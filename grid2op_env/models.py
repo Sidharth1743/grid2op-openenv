@@ -96,11 +96,15 @@ class GraderResponse(BaseModel):
 class BaselineRequest(BaseModel):
     model: str = Field(default="Qwen/Qwen3.5-9B")
     max_tokens: int = Field(default=32768, ge=1)
-    temperature: float = 1.0
-    top_p: float = 1.0
-    presence_penalty: float = 2.0
-    top_k: int = 40
+    temperature: float = 0.7
+    top_p: float = 0.8
+    presence_penalty: float = 1.5
+    top_k: int = 20
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
     enable_thinking: bool = False
+    num_seeds: int = Field(default=5, ge=1)
+    seed_start: int = Field(default=0, ge=0)
 
 
 class BaselineScores(BaseModel):
