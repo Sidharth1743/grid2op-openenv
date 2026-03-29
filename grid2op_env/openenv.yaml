@@ -1,0 +1,6 @@
+spec_version: 1
+name: grid2op_env
+type: local
+runtime: fastapi
+app: server.app:app
+port: 7860

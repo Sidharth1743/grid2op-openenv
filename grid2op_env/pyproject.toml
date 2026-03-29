@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grid2op-env"
+version = "0.1.0"
+description = "Standalone OpenEnv wrapper around Grid2Op"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "openenv-core[core]>=0.2.2",
+    "grid2op>=1.10.5",
+    "numpy>=1.24.0",
+    "openai>=2.7.2",
+    "python-dotenv>=1.0.1",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+lightsim = [
+    "lightsim2grid>=0.10.0",
+]
+
+[project.scripts]
+server = "grid2op_env.server.app:main"
+grid2op-smoke = "grid2op_env.server.grid_environment:smoke_main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["grid2op_env", "grid2op_env.server"]
+package-dir = { "grid2op_env" = ".", "grid2op_env.server" = "server" }
