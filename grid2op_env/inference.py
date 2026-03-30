@@ -9,18 +9,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, pstdev
-from typing import Any, Dict
+from typing import Any, Dict, Sequence
 
 import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from grid2op_env import BaselineRequest, BaselineScores, GridAction, GridEnv
+from grid2op_env.graph_analysis import analyze_grid_topology
 from grid2op_env.models import GridObservation, TaskId
-from grid2op_env.server.tasks import TASKS
-
-KNOWN_LINE_IDS = set(range(20))
-KNOWN_GEN_IDS = set(range(6))
+from grid2op_env.server.tasks import TASKS, inject_scenario_raw
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -65,6 +63,140 @@ class BaselineConfig:
     enable_thinking: bool
     num_seeds: int
     seed_start: int
+
+
+@dataclass
+class SimulationOutcome:
+    candidate_index: int
+    action: GridAction
+    trace: dict[str, Any]
+    done: bool
+    simulated_reward: float
+    max_rho: float
+    overloaded_line_ids: list[int]
+    disconnected_lines: list[int]
+    convergence_failed: bool
+    exceptions: list[str]
+    raw_result: dict[str, Any]
+
+
+class LocalSimulationSandbox:
+    """Local Grid2Op mirror used for hypothetical action evaluation."""
+
+    def __init__(self, task_id: TaskId, seed: int | None, env_name: str = "l2rpn_case14_sandbox"):
+        import grid2op
+
+        self._env = grid2op.make(env_name)
+        self._task_id = task_id
+        self._seed = seed
+        self._raw_obs, self.scenario_metadata = inject_scenario_raw(
+            self._env,
+            task_id,
+            seed=seed,
+        )
+        self.n_line = int(self._env.n_line)
+        self.n_gen = int(self._env.n_gen)
+        self.n_sub = int(self._env.n_sub)
+        self.line_or_to_subid = [int(x) for x in self._env.line_or_to_subid.tolist()]
+        self.line_ex_to_subid = [int(x) for x in self._env.line_ex_to_subid.tolist()]
+
+    def simulate_candidates(
+        self,
+        candidates: Sequence[tuple[GridAction, dict[str, Any]]],
+    ) -> list[SimulationOutcome]:
+        outcomes: list[SimulationOutcome] = []
+        for index, (action, trace) in enumerate(candidates, start=1):
+            try:
+                sim_obs, sim_reward, sim_done, sim_info = self._raw_obs.simulate(
+                    to_grid2op_action(self._env, action)
+                )
+                exceptions = [str(exc) for exc in sim_info.get("exception", [])]
+                max_rho = float(max(sim_obs.rho)) if len(sim_obs.rho) else 0.0
+                overloaded = [
+                    idx for idx, rho in enumerate(sim_obs.rho.tolist()) if float(rho) > 1.0
+                ]
+                disconnected = [
+                    idx for idx, status in enumerate(sim_obs.line_status.tolist()) if not bool(status)
+                ]
+                outcomes.append(
+                    SimulationOutcome(
+                        candidate_index=index,
+                        action=action,
+                        trace=trace,
+                        done=bool(sim_done),
+                        simulated_reward=float(sim_reward),
+                        max_rho=max_rho,
+                        overloaded_line_ids=overloaded,
+                        disconnected_lines=disconnected,
+                        convergence_failed=bool(sim_info.get("is_illegal") or sim_info.get("is_ambiguous")),
+                        exceptions=exceptions,
+                        raw_result={
+                            "done": bool(sim_done),
+                            "simulated_reward": float(sim_reward),
+                            "max_rho": max_rho,
+                            "overloaded_line_ids": overloaded,
+                            "disconnected_lines": disconnected,
+                            "exceptions": exceptions,
+                            "timestep_overflow": [int(x) for x in sim_obs.timestep_overflow.tolist()],
+                        },
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - simulator failures are runtime-specific
+                outcomes.append(
+                    SimulationOutcome(
+                        candidate_index=index,
+                        action=action,
+                        trace=trace,
+                        done=True,
+                        simulated_reward=-10.0,
+                        max_rho=999.0,
+                        overloaded_line_ids=[],
+                        disconnected_lines=[],
+                        convergence_failed=True,
+                        exceptions=[str(exc)],
+                        raw_result={
+                            "done": True,
+                            "simulated_reward": -10.0,
+                            "max_rho": 999.0,
+                            "overloaded_line_ids": [],
+                            "disconnected_lines": [],
+                            "exceptions": [str(exc)],
+                            "timestep_overflow": [],
+                        },
+                    )
+                )
+        return outcomes
+
+    def apply(self, action: GridAction) -> None:
+        obs, _, _, _ = self._env.step(to_grid2op_action(self._env, action))
+        self._raw_obs = obs
+
+    def compare_with_remote(
+        self,
+        remote_observation: GridObservation,
+        task_id: TaskId,
+        seed: int | None,
+        step_index: int,
+    ) -> None:
+        local_max = float(max(self._raw_obs.rho)) if len(self._raw_obs.rho) else 0.0
+        remote_max = float(max(remote_observation.rho)) if remote_observation.rho else 0.0
+        delta = abs(local_max - remote_max)
+        logger.info(
+            "Mirror alignment task_id=%s seed=%s step=%s local_max_rho=%.4f remote_max_rho=%.4f delta=%.6f",
+            task_id,
+            seed,
+            step_index,
+            local_max,
+            remote_max,
+            delta,
+        )
+
+    def close(self) -> None:
+        self._env.close()
+
+    @property
+    def raw_observation(self):
+        return self._raw_obs
 
 
 def run_baseline_suite(
@@ -125,49 +257,67 @@ def run_baseline_suite(
                     float(max(result.observation.rho)) if result.observation.rho else 0.0,
                     [idx for idx, status in enumerate(result.observation.line_status) if not status],
                 )
+                sandbox = LocalSimulationSandbox(task_id=task_id, seed=seed)
 
                 step_idx = 0
                 do_nothing_steps = 0
                 raw_outputs: list[dict[str, Any]] = []
-                while not result.done and step_idx < task.max_steps:
-                    action, raw_output, trace = choose_action_with_qwen(
-                        client=client,
-                        task_id=task_id,
-                        observation=result.observation,
-                        step_count=step_idx,
-                        max_steps=task.max_steps,
-                        include_task_description=(step_idx == 0),
-                        llm_config=llm_config,
-                    )
-                    raw_outputs.append(
-                        {
-                            "step": step_idx + 1,
-                            "raw_model_output": raw_output,
-                            "action_trace": trace,
-                            "action": action.model_dump(),
-                            "observation_summary": {
-                                "max_rho": max(result.observation.rho) if result.observation.rho else 0.0,
-                                "disconnected_lines": [
-                                    idx
-                                    for idx, status in enumerate(result.observation.line_status)
-                                    if not status
-                                ],
-                                "timestep_overflow": result.observation.timestep_overflow,
-                            },
-                        }
-                    )
-                    if action.do_nothing:
-                        do_nothing_steps += 1
-                    logger.info(
-                        "Baseline action task_id=%s seed=%s step=%s action=%s trace=%s",
-                        task_id,
-                        seed,
-                        step_idx + 1,
-                        action.model_dump(),
-                        trace,
-                    )
-                    result = env.step(action)
-                    step_idx += 1
+                try:
+                    while not result.done and step_idx < task.max_steps:
+                        action, planning_trace = choose_action_with_qwen(
+                            client=client,
+                            task_id=task_id,
+                            observation=result.observation,
+                            sandbox=sandbox,
+                            step_count=step_idx,
+                            max_steps=task.max_steps,
+                            include_task_description=(step_idx == 0),
+                            llm_config=llm_config,
+                        )
+                        raw_outputs.append(
+                            {
+                                "step": step_idx + 1,
+                                "proposal_prompt": planning_trace["proposal_prompt"],
+                                "proposal_raw_output": planning_trace["proposal_raw_output"],
+                                "proposal_trace": planning_trace["proposal_trace"],
+                                "graph_intelligence": planning_trace["graph_intelligence"],
+                                "simulations": planning_trace["simulations"],
+                                "final_prompt": planning_trace["final_prompt"],
+                                "final_raw_output": planning_trace["final_raw_output"],
+                                "final_trace": planning_trace["final_trace"],
+                                "selected_action": action.model_dump(),
+                                "observation_summary": {
+                                    "max_rho": max(result.observation.rho) if result.observation.rho else 0.0,
+                                    "disconnected_lines": [
+                                        idx
+                                        for idx, status in enumerate(result.observation.line_status)
+                                        if not status
+                                    ],
+                                    "timestep_overflow": result.observation.timestep_overflow,
+                                },
+                            }
+                        )
+                        if action.do_nothing:
+                            do_nothing_steps += 1
+                        logger.info(
+                            "Baseline action task_id=%s seed=%s step=%s action=%s trace=%s",
+                            task_id,
+                            seed,
+                            step_idx + 1,
+                            action.model_dump(),
+                            planning_trace["final_trace"],
+                        )
+                        result = env.step(action)
+                        sandbox.apply(action)
+                        step_idx += 1
+                        sandbox.compare_with_remote(
+                            result.observation,
+                            task_id=task_id,
+                            seed=seed,
+                            step_index=step_idx,
+                        )
+                finally:
+                    sandbox.close()
 
                 state = env.state()
                 logger.info(
@@ -249,14 +399,33 @@ def choose_action_with_qwen(
     client: OpenAI,
     task_id: TaskId,
     observation: GridObservation,
+    sandbox: LocalSimulationSandbox,
     step_count: int,
     max_steps: int,
     include_task_description: bool,
     llm_config: BaselineConfig,
-) -> tuple[GridAction, str, dict[str, Any]]:
-    prompt = build_prompt(
+) -> tuple[GridAction, dict[str, Any]]:
+    graph_intelligence = analyze_grid_topology(
+        sandbox.raw_observation,
+        line_or_to_subid=sandbox.line_or_to_subid,
+        line_ex_to_subid=sandbox.line_ex_to_subid,
+        n_sub=sandbox.n_sub,
+    )
+    logger.info(
+        "Graph intelligence task_id=%s step=%s bridges=%s safe_disconnect=%s central_buses=%s islanded=%s corridor=%s stressed=%s",
+        task_id,
+        step_count + 1,
+        graph_intelligence.get("bridge_lines", []),
+        graph_intelligence.get("safe_to_disconnect", []),
+        graph_intelligence.get("high_centrality_buses", []),
+        graph_intelligence.get("islanded_clusters", []),
+        graph_intelligence.get("congestion_corridor", "none"),
+        graph_intelligence.get("stressed_lines", []),
+    )
+    proposal_prompt = build_proposal_prompt(
         task_id=task_id,
         observation=observation,
+        graph_intelligence=graph_intelligence,
         step_count=step_count,
         max_steps=max_steps,
         include_task_description=include_task_description,
@@ -264,7 +433,7 @@ def choose_action_with_qwen(
 
     response = client.chat.completions.create(
         model=llm_config.model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": proposal_prompt}],
         max_tokens=llm_config.max_tokens,
         temperature=llm_config.temperature,
         top_p=llm_config.top_p,
@@ -277,124 +446,177 @@ def choose_action_with_qwen(
         },
     )
 
-    content = response.choices[0].message.content or ""
-    logger.info("Received model response task_id=%s chars=%s content=%r", task_id, len(content), content)
-    parsed = parse_json_action(content)
-    action, trace = validate_baseline_action(parsed)
-    return action, content, trace
+    proposal_raw_output = response.choices[0].message.content or ""
+    logger.info(
+        "Received proposal response task_id=%s chars=%s content=%r",
+        task_id,
+        len(proposal_raw_output),
+        proposal_raw_output,
+    )
+    proposal_candidates, proposal_trace = parse_candidate_proposals(
+        proposal_raw_output,
+        n_line=sandbox.n_line,
+        n_gen=sandbox.n_gen,
+    )
+    simulations = sandbox.simulate_candidates(proposal_candidates)
+    logger.info(
+        "Simulation results task_id=%s step=%s results=%s",
+        task_id,
+        step_count + 1,
+        [
+            {
+                "candidate_index": outcome.candidate_index,
+                "action": outcome.action.model_dump(),
+                "max_rho": outcome.max_rho,
+                "done": outcome.done,
+                "convergence_failed": outcome.convergence_failed,
+                "overloaded_line_ids": outcome.overloaded_line_ids,
+                "exceptions": outcome.exceptions,
+            }
+            for outcome in simulations
+        ],
+    )
+
+    final_prompt = build_final_selection_prompt(
+        task_id=task_id,
+        observation=observation,
+        step_count=step_count,
+        max_steps=max_steps,
+        simulations=simulations,
+    )
+    final_response = client.chat.completions.create(
+        model=llm_config.model,
+        messages=[{"role": "user", "content": final_prompt}],
+        max_tokens=llm_config.max_tokens,
+        temperature=llm_config.temperature,
+        top_p=llm_config.top_p,
+        presence_penalty=llm_config.presence_penalty,
+        extra_body={
+            "top_k": llm_config.top_k,
+            "min_p": llm_config.min_p,
+            "repetition_penalty": llm_config.repetition_penalty,
+            "chat_template_kwargs": {"enable_thinking": llm_config.enable_thinking},
+        },
+    )
+    final_raw_output = final_response.choices[0].message.content or ""
+    logger.info(
+        "Received final selection task_id=%s chars=%s content=%r",
+        task_id,
+        len(final_raw_output),
+        final_raw_output,
+    )
+    action, final_trace = select_final_action(
+        final_raw_output=final_raw_output,
+        simulations=simulations,
+        n_line=sandbox.n_line,
+        n_gen=sandbox.n_gen,
+    )
+    return action, {
+        "proposal_prompt": proposal_prompt,
+        "proposal_raw_output": proposal_raw_output,
+        "proposal_trace": proposal_trace,
+        "graph_intelligence": graph_intelligence,
+        "simulations": [serialize_simulation_outcome(outcome) for outcome in simulations],
+        "final_prompt": final_prompt,
+        "final_raw_output": final_raw_output,
+        "final_trace": final_trace,
+    }
 
 
-def build_prompt(
+def build_proposal_prompt(
     task_id: TaskId,
     observation: GridObservation,
+    graph_intelligence: dict[str, Any],
     step_count: int,
     max_steps: int,
     include_task_description: bool,
 ) -> str:
-    candidate_actions = build_candidate_actions(observation)
-    overloaded = [
-        f"line {idx}: rho={rho:.3f}"
-        for idx, rho in enumerate(observation.rho)
-        if rho >= 0.8
-    ]
+    line_count = len(observation.line_status)
+    gen_count = len(observation.gen_p)
+    stressed_lines = summarize_lines(observation.rho, limit=8, minimum_rho=0.7)
     disconnected = [
-        str(idx) for idx, status in enumerate(observation.line_status) if not status
+        {"line_id": idx, "status": "disconnected"}
+        for idx, status in enumerate(observation.line_status)
+        if not status
     ]
-    overflow_warnings = [
-        f"line {idx} overloaded for {count} steps"
-        for idx, count in enumerate(observation.timestep_overflow)
-        if count > 2
-    ]
-
+    generator_summary = summarize_generators(observation.gen_p, limit=6)
     lines = [
-        "You are a power grid operator. Respond with a single JSON object only.",
-        "Choose exactly one control action from the provided candidates.",
-        'Use this exact schema: {"action_type":"disconnect_line|reconnect_line|redispatch|do_nothing","line_id":null|int,"gen_id":null|int,"delta_mw":null|float,"reason":"short string"}',
-        "Rules: no markdown, no prose, no code fences, no extra keys.",
-        "RULE 1: If a line is currently disconnected, your highest priority is reconnect_line to restore grid capacity. Do not disconnect healthy lines while the grid is in a degraded state.",
-        "RULE 2: If lines are highly loaded (0.8 to 0.98) but overflow is 0, the grid is stable. The safest action is do_nothing. Prematurely disconnecting lines will cause a fatal cascade.",
+        "You are a grid operator proposing actions for a deterministic simulator.",
+        "Propose exactly 3 candidate actions to test in the physics sandbox.",
+        "Allowed action types: disconnect_line, reconnect_line, redispatch, do_nothing.",
+        "Return a single JSON object only.",
+        'Use this exact schema: {"candidates":[{"action_type":"disconnect_line|reconnect_line|redispatch|do_nothing","line_id":null|int,"gen_id":null|int,"delta_mw":null|float,"reason":"short string"}]}',
+        "Rules: no markdown, no prose, no code fences, no extra keys, exactly 3 candidates.",
+        "Diversity rule: use at least two different action types when plausible.",
         f"task_id={task_id}",
         f"step={step_count + 1}/{max_steps}",
         f"max_rho={max(observation.rho):.3f}" if observation.rho else "max_rho=0.0",
-        "lines_above_80=" + (", ".join(overloaded) if overloaded else "none"),
-        "disconnected_lines=" + (", ".join(disconnected) if disconnected else "none"),
+        f"line_count={line_count}",
+        f"generator_count={gen_count}",
+        "stressed_lines=" + json.dumps(stressed_lines, separators=(",", ":")),
+        "disconnected_lines=" + json.dumps(disconnected, separators=(",", ":")),
+        "generators=" + json.dumps(generator_summary, separators=(",", ":")),
+        "timestep_overflow=" + json.dumps(observation.timestep_overflow, separators=(",", ":")),
+        "grid_topology_intelligence=" + json.dumps(graph_intelligence, separators=(",", ":")),
     ]
-    if overflow_warnings:
-        lines.append("imminent_trip=" + ", ".join(overflow_warnings))
     if include_task_description:
         lines.append("task_description=" + TASKS[task_id].description)
-    lines.append("candidate_actions=" + json.dumps(candidate_actions, separators=(",", ":")))
     lines.append(
-        'example_1={"action_type":"disconnect_line","line_id":9,"gen_id":null,"delta_mw":null,"reason":"line 9 is the most overloaded"}'
+        'example_1={"candidates":[{"action_type":"disconnect_line","line_id":10,"gen_id":null,"delta_mw":null,"reason":"line 10 appears to be the stress bottleneck"},{"action_type":"redispatch","line_id":null,"gen_id":2,"delta_mw":10.0,"reason":"increase generator 2 to alter flows"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"keep a safe fallback"}]}'
     )
     lines.append(
-        'example_2={"action_type":"reconnect_line","line_id":0,"gen_id":null,"delta_mw":null,"reason":"restore capacity through a disconnected line"}'
-    )
-    lines.append(
-        'example_3={"action_type":"redispatch","line_id":null,"gen_id":2,"delta_mw":10.0,"reason":"increase generator 2 to relieve overloaded corridors"}'
-    )
-    lines.append(
-        'If none of the candidates is safe or useful, return {"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"no safe candidate"}'
+        'example_2={"candidates":[{"action_type":"reconnect_line","line_id":0,"gen_id":null,"delta_mw":null,"reason":"restore missing transfer capacity"},{"action_type":"redispatch","line_id":null,"gen_id":1,"delta_mw":-10.0,"reason":"reduce generator 1 output to ease a corridor"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"baseline if both interventions are dangerous"}]}'
     )
     return "\n".join(lines)
 
 
-def build_candidate_actions(observation: GridObservation) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    overloaded_lines = sorted(
-        ((idx, rho) for idx, rho in enumerate(observation.rho) if rho >= 0.8),
-        key=lambda item: item[1],
+def build_final_selection_prompt(
+    task_id: TaskId,
+    observation: GridObservation,
+    step_count: int,
+    max_steps: int,
+    simulations: Sequence[SimulationOutcome],
+) -> str:
+    lines = [
+        "You are a grid operator choosing a final action after reviewing simulator outcomes.",
+        "Select the safest candidate that reduces stress without ending the episode.",
+        "You must select one simulated candidate or explicit do_nothing.",
+        "Return a single JSON object only.",
+        'Use this exact schema: {"selected_candidate":1|2|3|0,"action":{"action_type":"disconnect_line|reconnect_line|redispatch|do_nothing","line_id":null|int,"gen_id":null|int,"delta_mw":null|float,"reason":"short string"},"reason":"short string"}',
+        "Use selected_candidate=0 only if every candidate is unsafe.",
+        "Rules: no markdown, no prose, no code fences, no extra keys.",
+        f"task_id={task_id}",
+        f"step={step_count + 1}/{max_steps}",
+        f"current_max_rho={max(observation.rho):.3f}" if observation.rho else "current_max_rho=0.0",
+        "simulation_results=" + json.dumps(
+            [serialize_simulation_outcome(outcome) for outcome in simulations],
+            separators=(",", ":"),
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def summarize_lines(rho: Sequence[float], limit: int, minimum_rho: float) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {"line_id": idx, "rho": round(float(value), 4)}
+            for idx, value in enumerate(rho)
+            if float(value) >= minimum_rho
+        ),
+        key=lambda item: item["rho"],
         reverse=True,
-    )
-    disconnected_lines = [idx for idx, status in enumerate(observation.line_status) if not status]
+    )[:limit]
 
-    for idx in disconnected_lines[:2]:
-        candidates.append(
-            {
-                "action_type": "reconnect_line",
-                "line_id": idx,
-                "reason_hint": "highest priority: reconnect a previously disconnected line to restore capacity",
-            }
-        )
 
-    if overloaded_lines and not disconnected_lines:
-        top_gen_candidates = [0, 1, 2]
-        for gen_id in top_gen_candidates:
-            candidates.append(
-                {
-                    "action_type": "redispatch",
-                    "gen_id": gen_id,
-                    "delta_mw": 10.0,
-                    "reason_hint": "increase generation to relieve stressed lines",
-                }
-            )
-            candidates.append(
-                {
-                    "action_type": "redispatch",
-                    "gen_id": gen_id,
-                    "delta_mw": -10.0,
-                    "reason_hint": "decrease generation if it appears to worsen congestion",
-                }
-            )
-
-    for idx, rho in overloaded_lines[:3]:
-        overflow = observation.timestep_overflow[idx] if idx < len(observation.timestep_overflow) else 0
-        if rho > 0.99 and overflow > 0 and not disconnected_lines:
-            candidates.append(
-                {
-                    "action_type": "disconnect_line",
-                    "line_id": idx,
-                    "reason_hint": f"emergency-only disconnect because rho={rho:.3f} and overflow={overflow}",
-                }
-            )
-
-    candidates.append(
-        {
-            "action_type": "do_nothing",
-            "reason_hint": "preferred when the grid is hot but stable or when reconnect is already done and no overflow emergency exists",
-        }
-    )
-    return candidates
+def summarize_generators(gen_p: Sequence[float], limit: int) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {"gen_id": idx, "p_mw": round(float(value), 4)}
+            for idx, value in enumerate(gen_p)
+        ),
+        key=lambda item: abs(item["p_mw"]),
+        reverse=True,
+    )[:limit]
 
 
 def parse_json_action(content: str) -> Dict[str, Any]:
@@ -407,7 +629,144 @@ def parse_json_action(content: str) -> Dict[str, Any]:
         return {"do_nothing": True}
 
 
-def validate_baseline_action(payload: Dict[str, Any]) -> tuple[GridAction, dict[str, Any]]:
+def parse_candidate_proposals(
+    content: str,
+    n_line: int,
+    n_gen: int,
+) -> tuple[list[tuple[GridAction, dict[str, Any]]], dict[str, Any]]:
+    payload = parse_json_action(content)
+    raw_candidates = payload.get("candidates", [])
+    candidates: list[tuple[GridAction, dict[str, Any]]] = []
+    if isinstance(raw_candidates, list):
+        for item in raw_candidates[:3]:
+            if isinstance(item, dict):
+                candidates.append(
+                    validate_baseline_action(item, n_line=n_line, n_gen=n_gen)
+                )
+
+    deduped: list[tuple[GridAction, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for action, trace in candidates:
+        key = json.dumps(action.model_dump(), sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((action, trace))
+
+    fallback_pool = [
+        (GridAction(do_nothing=True), {"decision": "do_nothing", "reason": "fallback_baseline"}),
+        (GridAction(redispatch={0: 10.0}), {"decision": "redispatch", "reason": "fallback_generator_0_up"}),
+        (GridAction(redispatch={0: -10.0}), {"decision": "redispatch", "reason": "fallback_generator_0_down"}),
+    ]
+    for action, trace in fallback_pool:
+        if len(deduped) >= 3:
+            break
+        key = json.dumps(action.model_dump(), sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((action, trace))
+
+    return deduped[:3], {
+        "parsed_candidate_count": len(candidates),
+        "deduped_candidate_count": len(deduped[:3]),
+    }
+
+
+def select_final_action(
+    final_raw_output: str,
+    simulations: Sequence[SimulationOutcome],
+    n_line: int,
+    n_gen: int,
+) -> tuple[GridAction, dict[str, Any]]:
+    payload = parse_json_action(final_raw_output)
+    reason = payload.get("reason", "")
+    selected_candidate = payload.get("selected_candidate")
+
+    try:
+        selected_candidate = int(selected_candidate)
+    except (TypeError, ValueError):
+        selected_candidate = None
+
+    if selected_candidate == 0:
+        return GridAction(do_nothing=True), {
+            "decision": "do_nothing",
+            "reason": reason or "model_rejected_all_candidates",
+        }
+
+    action_payload = payload.get("action")
+    if isinstance(action_payload, dict):
+        action, trace = validate_baseline_action(action_payload, n_line=n_line, n_gen=n_gen)
+        for outcome in simulations:
+            if actions_equivalent(action, outcome.action):
+                return outcome.action, {
+                    "decision": "simulated_candidate",
+                    "reason": reason or trace.get("reason", ""),
+                    "selected_candidate": outcome.candidate_index,
+                }
+
+    if selected_candidate is not None:
+        for outcome in simulations:
+            if outcome.candidate_index == selected_candidate:
+                return outcome.action, {
+                    "decision": "simulated_candidate_by_index",
+                    "reason": reason or outcome.trace.get("reason", ""),
+                    "selected_candidate": selected_candidate,
+                }
+
+    best = choose_best_simulation(simulations)
+    return best.action, {
+        "decision": "fallback_best_simulation",
+        "reason": reason or "invalid_final_selection",
+        "selected_candidate": best.candidate_index,
+    }
+
+
+def choose_best_simulation(simulations: Sequence[SimulationOutcome]) -> SimulationOutcome:
+    safe = [
+        outcome
+        for outcome in simulations
+        if not outcome.done and not outcome.convergence_failed
+    ]
+    if safe:
+        return min(
+            safe,
+            key=lambda outcome: (outcome.max_rho, len(outcome.overloaded_line_ids), outcome.candidate_index),
+        )
+    nonfatal = [outcome for outcome in simulations if not outcome.convergence_failed]
+    if nonfatal:
+        return min(
+            nonfatal,
+            key=lambda outcome: (outcome.done, outcome.max_rho, outcome.candidate_index),
+        )
+    return min(simulations, key=lambda outcome: outcome.candidate_index)
+
+
+def serialize_simulation_outcome(outcome: SimulationOutcome) -> dict[str, Any]:
+    return {
+        "candidate_index": outcome.candidate_index,
+        "action": outcome.action.model_dump(),
+        "proposal_trace": outcome.trace,
+        "done": outcome.done,
+        "simulated_reward": outcome.simulated_reward,
+        "max_rho": outcome.max_rho,
+        "overloaded_line_ids": outcome.overloaded_line_ids,
+        "disconnected_lines": outcome.disconnected_lines,
+        "convergence_failed": outcome.convergence_failed,
+        "exceptions": outcome.exceptions,
+        "raw_result": outcome.raw_result,
+    }
+
+
+def actions_equivalent(lhs: GridAction, rhs: GridAction) -> bool:
+    return lhs.model_dump() == rhs.model_dump()
+
+
+def validate_baseline_action(
+    payload: Dict[str, Any],
+    n_line: int,
+    n_gen: int,
+) -> tuple[GridAction, dict[str, Any]]:
     action_type = payload.get("action_type")
     if payload.get("do_nothing") or action_type == "do_nothing":
         return GridAction(do_nothing=True), {"decision": "do_nothing", "reason": payload.get("reason", "explicit_do_nothing")}
@@ -423,7 +782,7 @@ def validate_baseline_action(payload: Dict[str, Any]) -> tuple[GridAction, dict[
             status = int(value)
         except (TypeError, ValueError):
             continue
-        if line_id in KNOWN_LINE_IDS and status in (-1, 1):
+        if 0 <= line_id < n_line and status in (-1, 1):
             valid_line_set[line_id] = status
 
     redispatch_payload = payload.get("redispatch") or {}
@@ -436,7 +795,7 @@ def validate_baseline_action(payload: Dict[str, Any]) -> tuple[GridAction, dict[
             line_id = int(line_id)
         except (TypeError, ValueError):
             line_id = None
-        if line_id in KNOWN_LINE_IDS:
+        if line_id is not None and 0 <= line_id < n_line:
             return (
                 GridAction(line_set={line_id: -1}, redispatch={}),
                 {"decision": "disconnect_line", "reason": payload.get("reason", "")},
@@ -449,7 +808,7 @@ def validate_baseline_action(payload: Dict[str, Any]) -> tuple[GridAction, dict[
             line_id = int(line_id)
         except (TypeError, ValueError):
             line_id = None
-        if line_id in KNOWN_LINE_IDS:
+        if line_id is not None and 0 <= line_id < n_line:
             return (
                 GridAction(line_set={line_id: 1}, redispatch={}),
                 {"decision": "reconnect_line", "reason": payload.get("reason", "")},
@@ -465,7 +824,7 @@ def validate_baseline_action(payload: Dict[str, Any]) -> tuple[GridAction, dict[
         except (TypeError, ValueError):
             gen_id = None
             delta = None
-        if gen_id in KNOWN_GEN_IDS and delta is not None:
+        if gen_id is not None and 0 <= gen_id < n_gen and delta is not None:
             return (
                 GridAction(redispatch={gen_id: delta}, line_set={}),
                 {"decision": "redispatch", "reason": payload.get("reason", "")},
@@ -479,7 +838,7 @@ def validate_baseline_action(payload: Dict[str, Any]) -> tuple[GridAction, dict[
             delta = float(value)
         except (TypeError, ValueError):
             continue
-        if gen_id in KNOWN_GEN_IDS:
+        if 0 <= gen_id < n_gen:
             valid_redispatch[gen_id] = delta
 
     if not valid_line_set and not valid_redispatch:
@@ -488,6 +847,18 @@ def validate_baseline_action(payload: Dict[str, Any]) -> tuple[GridAction, dict[
         GridAction(line_set=valid_line_set, redispatch=valid_redispatch),
         {"decision": "legacy_payload", "reason": payload.get("reason", "")},
     )
+
+
+def to_grid2op_action(env, action: GridAction):
+    if action.do_nothing:
+        return env.action_space()
+
+    payload = {}
+    if action.line_set:
+        payload["set_line_status"] = sorted((int(k), int(v)) for k, v in action.line_set.items())
+    if action.redispatch:
+        payload["redispatch"] = sorted((int(k), float(v)) for k, v in action.redispatch.items())
+    return env.action_space(payload)
 
 
 def write_evaluation_outputs(

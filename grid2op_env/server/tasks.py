@@ -71,13 +71,13 @@ def task_list() -> List[TaskInfo]:
     ]
 
 
-def inject_scenario(
+def inject_scenario_raw(
     env,
     task_id: TaskId,
     seed: int | None = None,
     max_attempts: int = 3,
-) -> tuple[GridObservation, Dict[str, Any]]:
-    """Initialize the environment according to the selected task."""
+):
+    """Initialize the environment according to the selected task and return the raw Grid2Op observation."""
 
     if task_id not in TASKS:
         raise ValueError(f"Unsupported task_id: {task_id}")
@@ -107,6 +107,23 @@ def inject_scenario(
     raise RuntimeError("Unreachable")
 
 
+def inject_scenario(
+    env,
+    task_id: TaskId,
+    seed: int | None = None,
+    max_attempts: int = 3,
+) -> tuple[GridObservation, Dict[str, Any]]:
+    """Initialize the environment according to the selected task."""
+
+    raw_obs, metadata = inject_scenario_raw(
+        env,
+        task_id,
+        seed=seed,
+        max_attempts=max_attempts,
+    )
+    return _convert(raw_obs), metadata
+
+
 def _reset_single_fault(env, seed: int | None, attempt: int):
     options = {"time serie id": attempt}
     obs = env.reset(seed=seed, options=options)
@@ -121,7 +138,7 @@ def _reset_single_fault(env, seed: int | None, attempt: int):
                 warmup_steps,
                 max_rho,
             )
-            return _convert(obs), {
+            return obs, {
                 "warmup_steps": warmup_steps,
                 "scenario": "high_loading",
             }
@@ -141,7 +158,7 @@ def _reset_n_minus_1(env, seed: int | None):
         options={"init state": {"set_line_status": [(0, -1)]}},
     )
     logger.info("Initialized n_minus_1 with faulted_lines=[0]")
-    return _convert(obs), {"faulted_lines": [0]}
+    return obs, {"faulted_lines": [0]}
 
 
 def _reset_cascade_prevent(env, seed: int | None, attempt: int):
@@ -162,7 +179,7 @@ def _reset_cascade_prevent(env, seed: int | None, attempt: int):
         list(line_pair),
         float(max(obs.rho)),
     )
-    return _convert(obs), {"faulted_lines": list(line_pair), "load_scale": 1.15}
+    return obs, {"faulted_lines": list(line_pair), "load_scale": 1.15}
 
 
 def _convert(obs) -> GridObservation:
