@@ -25,18 +25,15 @@ def grade_episode(task_id: TaskId, episode_log: Iterable[EpisodeStepLog]) -> flo
 
 def grade_single_fault(episode_log: list[EpisodeStepLog]) -> float:
     for entry in episode_log:
-        if entry.all_lines_below_90:
-            if entry.step <= 1:
-                return 1.0
-            slope = 0.5 / 9.0
-            return max(0.5, 1.0 - ((entry.step - 1) * slope))
+        if entry.all_lines_below_80:
+            return round(max(0.0, 1.0 - (0.08 * max(0, entry.step - 1))), 6)
     return 0.0
 
 
 def grade_n_minus_1(episode_log: list[EpisodeStepLog], max_steps: int = 20) -> float:
     if not episode_log:
         return 0.0
-    survived_steps = sum(1 for entry in episode_log if not entry.convergence_failed)
+    survived_steps = min(max_steps, max(entry.step for entry in episode_log))
     return round(min(1.0, survived_steps / max_steps), 6)
 
 

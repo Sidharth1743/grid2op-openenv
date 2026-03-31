@@ -50,7 +50,7 @@ def analyze_grid_topology(
     for line_id in connected_line_ids:
         u = int(line_or_to_subid[line_id])
         v = int(line_ex_to_subid[line_id])
-        key = tuple(sorted((u, v)))
+        key = tuple(sorted((int(u), int(v))))
         pair_to_lines[key].append(line_id)
 
     parallel_groups = {

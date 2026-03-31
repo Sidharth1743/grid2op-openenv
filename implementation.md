@@ -1,6 +1,6 @@
 # Grid2Op Environment Implementation
 
-This document describes the implemented `grid2op_env` package, verifies it against `PROJECT.md`, and provides the exact run procedures for local development, local Docker, and baseline evaluation.
+This document describes the implemented `grid2op_env` package, verifies it against `PROJECT.md`, and provides the exact run procedures for local development, local Docker, and baseline evaluation. It reflects the current server-side simulation architecture.
 
 ## Scope
 
@@ -106,11 +106,16 @@ Implemented:
 - models in [grid2op_env/models.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/models.py)
 - adapter in [grid2op_env/server/grid_environment.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/grid_environment.py)
 - `episode_log` stored on `GridState`
+- live-session planning interfaces:
+  - `PlanningContextRequest`
+  - `PlanningContextResponse`
+  - `SimulationRequest`
+  - `SimulationResponse`
 
 Verification:
 
 - direct test coverage in [grid2op_env/tests/test_grid2op_env.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/tests/test_grid2op_env.py)
-- `3 passed` in focused pytest run
+- current focused pytest run: `11 passed`
 
 ### Layer 3: task and scenario system
 
@@ -138,23 +143,28 @@ Verification:
 
 ### Layer 4: reward function
 
-Required by `PROJECT.md`:
+Required by the current spec:
 
-- safe-step bonus `+0.1` when all lines are below 80%
-- overload penalty `-0.2` per overloaded line
-- blackout terminal penalty `-10.0`
-- survival bonus `+5.0`
-- oscillation penalty `-0.05` when repeating the same action three times
-- invalid-action fallback penalty `-0.1` from the later blindspot section
+- `single_fault`
+  - speed bonus `1 / step_number` when fixed
+  - safe margin bonus `0.05 * (1 - rho_max)`
+  - overload penalty `-0.2` per overloaded line
+  - failure penalty `-5.0` if max steps reached without fixing
+- `n_minus_1`
+  - sustained safety bonus `0.1 * safe_line_ratio`
+  - margin delta `+0.05 / -0.05`
+  - overload penalty `-0.3` per overloaded line
+  - survival bonus `+3.0`
+  - blackout penalty `-8.0`
+- `cascade_prevent`
+  - cascade prevention bonus `+0.2`
+  - overflow duration penalty `-0.1 * timestep_overflow`
+  - topology efficiency bonus `+0.05` when `topology_change_count == 0`
+  - cascade event penalty `-2.0`
+  - blackout penalty `-10.0`
+  - survival bonus `+5.0`
 
-Implemented in [grid2op_env/server/grid_environment.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/grid_environment.py):
-
-- safe-step bonus
-- overload penalty
-- terminal penalty on early failure or convergence failure
-- survival bonus on reaching `max_steps`
-- oscillation penalty via three-entry action history
-- invalid action penalty only when invalid input collapses to do-nothing
+Implemented in [grid2op_env/server/grid_environment.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/grid_environment.py).
 
 ### Layer 5: deterministic graders
 
@@ -184,6 +194,7 @@ Required by `PROJECT.md`:
 - `/tasks`
 - `/grader`
 - `/baseline`
+- live simulation support for the planner
 
 Implemented in [grid2op_env/server/app.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/app.py):
 
@@ -191,6 +202,8 @@ Implemented in [grid2op_env/server/app.py](/home/sidharth/Desktop/Openenv_module
 - `GET /tasks`
 - `POST /grader`
 - `POST /baseline`
+- `POST /planning_context`
+- `POST /simulate`
 
 Verification:
 
@@ -224,27 +237,47 @@ Implemented:
 - `.env` loading via `load_dotenv()`
 - OpenAI-compatible Chat Completions API support
 - Qwen-compatible extra parameters
-- baseline-side action validation against 20 lines and 6 generators
+- baseline-side action validation against live `n_line`, `n_gen`, and redispatchable generators
+- server-side planning context lookup by `episode_id`
+- server-side candidate simulation on the active live session
 
-Verified runtime output:
+Current planner flow:
+
+1. `reset(task_id, seed, difficulty_level)`
+2. `state()` to get `episode_id`
+3. `planning_context(episode_id)`
+4. LLM proposes 3 actions
+5. `simulate_candidates(episode_id, actions)`
+6. LLM selects final action
+7. `step(action)`
+8. `/grader`
+
+Previously, `inference.py` used a local replay mirror. That path was removed from the active planning loop because it caused state drift on `n_minus_1` and `cascade_prevent`.
+
+Latest verified runtime output:
 
 ```json
 {
   "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
   "scores": {
-    "single_fault": 0.6111111111111112,
+    "single_fault": 0.752,
     "n_minus_1": 1.0,
-    "cascade_prevent": 0.196667
+    "cascade_prevent": 1.0
   },
   "episode_lengths": {
-    "single_fault": 10,
+    "single_fault": 3,
     "n_minus_1": 20,
-    "cascade_prevent": 3
+    "cascade_prevent": 30
   }
 }
 ```
 
-This satisfies the spec requirement that the baseline runs without error and produces scores.
+This satisfies the spec requirement that the baseline runs without error and produces scores. It also verifies that the active planner path now uses server-side simulation rather than a replayed local sandbox.
+
+Important caveat:
+
+- the latest `cascade_prevent = 1.0` run only covered early curriculum episodes in the 5-seed sweep
+- `single_fault` still sometimes falls back to easier stable warmup states outside the intended target range
 
 ## Blindspot handling from PROJECT.md
 

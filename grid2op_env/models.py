@@ -51,6 +51,9 @@ class EpisodeStepLog(BaseModel):
     all_lines_below_100: bool = False
     disconnected_lines: List[int] = Field(default_factory=list)
     timestep_overflow: List[int] = Field(default_factory=list)
+    safe_line_ratio: float = 0.0
+    topology_change_count: int = 0
+    auto_trip_detected: bool = False
     invalid_action: bool = False
     invalid_action_reason: str | None = None
     convergence_failed: bool = False
@@ -111,3 +114,35 @@ class BaselineScores(BaseModel):
     model: str
     scores: Dict[TaskId, float]
     episode_lengths: Dict[TaskId, int]
+
+
+class SimulationRequest(BaseModel):
+    episode_id: str
+    actions: List[GridAction]
+
+
+class SimulationResult(BaseModel):
+    action: GridAction
+    max_rho: float
+    done: bool
+    simulated_reward: float
+    overloaded_line_ids: List[int] = Field(default_factory=list)
+    disconnected_lines: List[int] = Field(default_factory=list)
+    convergence_failed: bool = False
+    exceptions: List[str] = Field(default_factory=list)
+    raw_result: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SimulationResponse(BaseModel):
+    episode_id: str
+    results: List[SimulationResult]
+
+
+class PlanningContextRequest(BaseModel):
+    episode_id: str
+
+
+class PlanningContextResponse(BaseModel):
+    episode_id: str
+    graph_intelligence: Dict[str, Any] = Field(default_factory=dict)
+    redispatchable_generators: List[int] = Field(default_factory=list)

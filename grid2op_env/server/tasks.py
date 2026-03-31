@@ -76,25 +76,41 @@ def inject_scenario_raw(
     task_id: TaskId,
     seed: int | None = None,
     max_attempts: int = 3,
+    difficulty_level: int | None = None,
 ):
     """Initialize the environment according to the selected task and return the raw Grid2Op observation."""
 
     if task_id not in TASKS:
         raise ValueError(f"Unsupported task_id: {task_id}")
 
-    for attempt in range(max_attempts):
+    effective_attempts = max_attempts
+    if task_id == "single_fault":
+        effective_attempts = max(max_attempts, 8)
+
+    for attempt in range(effective_attempts):
         try:
             logger.info(
-                "Injecting scenario task_id=%s attempt=%s seed=%s",
+                "Injecting scenario task_id=%s attempt=%s seed=%s difficulty_level=%s",
                 task_id,
                 attempt + 1,
                 seed,
+                difficulty_level,
             )
             if task_id == "single_fault":
-                return _reset_single_fault(env, seed=seed, attempt=attempt)
+                return _reset_single_fault(
+                    env,
+                    seed=seed,
+                    attempt=attempt,
+                    difficulty_level=difficulty_level,
+                )
             if task_id == "n_minus_1":
-                return _reset_n_minus_1(env, seed=seed)
-            return _reset_cascade_prevent(env, seed=seed, attempt=attempt)
+                return _reset_n_minus_1(env, seed=seed, difficulty_level=difficulty_level)
+            return _reset_cascade_prevent(
+                env,
+                seed=seed,
+                attempt=attempt,
+                difficulty_level=difficulty_level,
+            )
         except Grid2OpException as exc:
             logger.warning(
                 "Scenario injection failed task_id=%s attempt=%s error=%s",
@@ -102,7 +118,7 @@ def inject_scenario_raw(
                 attempt + 1,
                 exc,
             )
-            if attempt == max_attempts - 1:
+            if attempt == effective_attempts - 1:
                 raise
     raise RuntimeError("Unreachable")
 
@@ -112,6 +128,7 @@ def inject_scenario(
     task_id: TaskId,
     seed: int | None = None,
     max_attempts: int = 3,
+    difficulty_level: int | None = None,
 ) -> tuple[GridObservation, Dict[str, Any]]:
     """Initialize the environment according to the selected task."""
 
@@ -120,66 +137,256 @@ def inject_scenario(
         task_id,
         seed=seed,
         max_attempts=max_attempts,
+        difficulty_level=difficulty_level,
     )
     return _convert(raw_obs), metadata
 
 
-def _reset_single_fault(env, seed: int | None, attempt: int):
-    options = {"time serie id": attempt}
+def replay_scenario_raw(
+    env,
+    task_id: TaskId,
+    seed: int | None,
+    scenario_metadata: dict[str, Any],
+):
+    """Replay the exact scenario selected by the server using persisted metadata."""
+
+    if task_id == "single_fault":
+        time_series_id = scenario_metadata.get("time_series_id")
+        warmup_steps = scenario_metadata.get("warmup_steps")
+        if time_series_id is None or warmup_steps is None:
+            raise Grid2OpException(
+                "single_fault scenario metadata is missing time_series_id or warmup_steps; restart the env server with the current code"
+            )
+        return _replay_single_fault_state(
+            env=env,
+            seed=seed,
+            options={"time serie id": int(time_series_id)},
+            warmup_steps=int(warmup_steps),
+        )
+
+    if task_id == "n_minus_1":
+        faulted_lines = [int(line_id) for line_id in scenario_metadata.get("faulted_lines", [0])]
+        return env.reset(
+            seed=seed,
+            options={"init state": {"set_line_status": [(line_id, -1) for line_id in faulted_lines]}},
+        )
+
+    if task_id == "cascade_prevent":
+        faulted_lines = scenario_metadata.get("faulted_lines")
+        load_scale = scenario_metadata.get("load_scale")
+        if faulted_lines is None or load_scale is None:
+            raise Grid2OpException(
+                "cascade_prevent scenario metadata is missing faulted_lines or load_scale; restart the env server with the current code"
+            )
+        base_obs = env.reset(seed=seed)
+        load_p = [float(v) for v in (base_obs.load_p * float(load_scale)).astype(float).tolist()]
+        return env.reset(
+            seed=seed,
+            options={
+                "init state": {
+                    "set_line_status": [(int(line_id), -1) for line_id in faulted_lines],
+                    "injection": {"load_p": load_p},
+                }
+            },
+        )
+
+    raise ValueError(f"Unsupported task_id for replay: {task_id}")
+
+
+def _curriculum_episode(difficulty_level: int | None) -> int:
+    if difficulty_level is None or difficulty_level < 1:
+        return 1
+    return int(difficulty_level)
+
+
+def _distance_to_range(value: float, lower: float, upper: float) -> float:
+    if value < lower:
+        return lower - value
+    if value > upper:
+        return value - upper
+    return 0.0
+
+
+def _single_fault_profile(difficulty_level: int | None) -> tuple[str, float, float]:
+    episode = _curriculum_episode(difficulty_level)
+    if episode <= 3:
+        return "mild", 0.85, 0.90
+    if episode <= 6:
+        return "moderate", 0.90, 0.95
+    return "severe", 0.95, 1.00
+
+
+def _cascade_profile(difficulty_level: int | None, seed: int | None) -> tuple[str, list[int], float]:
+    episode = _curriculum_episode(difficulty_level)
+    pair_index = ((episode - 1) + (0 if seed is None else int(seed))) % len(CASCADE_LINE_PAIRS)
+    selected_pair = list(CASCADE_LINE_PAIRS[pair_index])
+    if episode <= 3:
+        return "one_line_5pct", [selected_pair[0]], 1.05
+    if episode <= 6:
+        return "one_line_10pct", [selected_pair[0]], 1.10
+    if episode <= 9:
+        return "two_lines_10pct", selected_pair, 1.10
+    return "two_lines_15pct", selected_pair, 1.15
+
+
+def _reset_single_fault(
+    env,
+    seed: int | None,
+    attempt: int,
+    difficulty_level: int | None,
+):
+    stage, min_rho, max_rho_target = _single_fault_profile(difficulty_level)
+    options = {"time serie id": _curriculum_episode(difficulty_level) - 1 + attempt}
     obs = env.reset(seed=seed, options=options)
     max_warmup = 48
     warmup_steps = 0
+    best_obs = obs
+    best_warmup_steps = 0
+    best_max_rho = float(max(obs.rho))
+    best_distance = _distance_to_range(best_max_rho, min_rho, max_rho_target)
+    best_stable_obs = obs if best_max_rho < 1.0 else None
+    best_stable_warmup_steps = 0
+    best_stable_max_rho = best_max_rho
+    best_stable_distance = best_distance if best_max_rho < 1.0 else float("inf")
 
     while warmup_steps < max_warmup:
         max_rho = float(max(obs.rho))
-        if 0.90 <= max_rho <= 0.98:
+        distance = _distance_to_range(max_rho, min_rho, max_rho_target)
+        if distance < best_distance:
+            best_obs = obs
+            best_warmup_steps = warmup_steps
+            best_max_rho = max_rho
+            best_distance = distance
+        if max_rho < 1.0 and distance < best_stable_distance:
+            best_stable_obs = obs
+            best_stable_warmup_steps = warmup_steps
+            best_stable_max_rho = max_rho
+            best_stable_distance = distance
+        if min_rho <= max_rho <= max_rho_target:
             logger.info(
-                "Selected single_fault warmup state warmup_steps=%s max_rho=%.4f",
+                "Selected single_fault warmup state stage=%s warmup_steps=%s max_rho=%.4f target=[%.2f, %.2f]",
+                stage,
                 warmup_steps,
                 max_rho,
+                min_rho,
+                max_rho_target,
             )
             return obs, {
-                "warmup_steps": warmup_steps,
-                "scenario": "high_loading",
-            }
+                    "curriculum_episode": _curriculum_episode(difficulty_level),
+                    "curriculum_stage": stage,
+                    "time_series_id": int(options["time serie id"]),
+                    "target_rho_range": [min_rho, max_rho_target],
+                    "warmup_steps": warmup_steps,
+                    "target_matched": True,
+                    "scenario": "high_loading",
+                }
         obs, _, done, _ = env.step(env.action_space())
         warmup_steps += 1
+        max_rho = float(max(obs.rho))
+        distance = _distance_to_range(max_rho, min_rho, max_rho_target)
+        if distance < best_distance:
+            best_obs = obs
+            best_warmup_steps = warmup_steps
+            best_max_rho = max_rho
+            best_distance = distance
+        if max_rho < 1.0 and distance < best_stable_distance:
+            best_stable_obs = obs
+            best_stable_warmup_steps = warmup_steps
+            best_stable_max_rho = max_rho
+            best_stable_distance = distance
         if done:
             break
 
+    if best_stable_obs is not None:
+        logger.warning(
+            "Falling back to closest stable single_fault warmup state stage=%s best_warmup_steps=%s best_max_rho=%.4f target=[%.2f, %.2f]",
+            stage,
+            best_stable_warmup_steps,
+            best_stable_max_rho,
+            min_rho,
+            max_rho_target,
+        )
+        replayed_obs = _replay_single_fault_state(
+            env=env,
+            seed=seed,
+            options=options,
+            warmup_steps=best_stable_warmup_steps,
+        )
+        return replayed_obs, {
+            "curriculum_episode": _curriculum_episode(difficulty_level),
+            "curriculum_stage": stage,
+            "time_series_id": int(options["time serie id"]),
+            "target_rho_range": [min_rho, max_rho_target],
+            "warmup_steps": best_stable_warmup_steps,
+            "target_matched": False,
+            "stable_fallback_used": True,
+            "scenario": "high_loading_closest_stable_match",
+        }
     raise Grid2OpException(
-        f"Could not find a single-fault warmup state after {max_warmup} steps"
+        f"Could not find a stable single-fault warmup state in target range [{min_rho:.2f}, {max_rho_target:.2f}] after {max_warmup} steps"
     )
 
 
-def _reset_n_minus_1(env, seed: int | None):
+def _replay_single_fault_state(env, seed: int | None, options: dict[str, Any], warmup_steps: int):
+    """Reset and replay the deterministic warmup so env backend matches the returned observation."""
+
+    obs = env.reset(seed=seed, options=options)
+    for _ in range(warmup_steps):
+        obs, _, done, _ = env.step(env.action_space())
+        if done:
+            raise Grid2OpException(
+                f"Could not replay single_fault warmup to step {warmup_steps}: episode terminated during replay"
+            )
+    return obs
+
+
+def _reset_n_minus_1(env, seed: int | None, difficulty_level: int | None):
     obs = env.reset(
         seed=seed,
         options={"init state": {"set_line_status": [(0, -1)]}},
     )
-    logger.info("Initialized n_minus_1 with faulted_lines=[0]")
-    return obs, {"faulted_lines": [0]}
+    logger.info(
+        "Initialized n_minus_1 with faulted_lines=[0] curriculum_episode=%s",
+        _curriculum_episode(difficulty_level),
+    )
+    return obs, {
+        "faulted_lines": [0],
+        "curriculum_episode": _curriculum_episode(difficulty_level),
+        "curriculum_stage": "fixed_n_minus_1",
+    }
 
 
-def _reset_cascade_prevent(env, seed: int | None, attempt: int):
+def _reset_cascade_prevent(
+    env,
+    seed: int | None,
+    attempt: int,
+    difficulty_level: int | None,
+):
     base_obs = env.reset(seed=seed)
-    line_pair = CASCADE_LINE_PAIRS[attempt % len(CASCADE_LINE_PAIRS)]
-    load_p = [float(v) for v in (base_obs.load_p * 1.15).astype(float).tolist()]
+    stage, faulted_lines, load_scale = _cascade_profile(difficulty_level, seed)
+    load_p = [float(v) for v in (base_obs.load_p * load_scale).astype(float).tolist()]
     obs = env.reset(
         seed=seed,
         options={
             "init state": {
-                "set_line_status": [(line_pair[0], -1), (line_pair[1], -1)],
+                "set_line_status": [(line_id, -1) for line_id in faulted_lines],
                 "injection": {"load_p": load_p},
             }
         },
     )
     logger.info(
-        "Initialized cascade_prevent with faulted_lines=%s load_scale=1.15 max_rho=%.4f",
-        list(line_pair),
+        "Initialized cascade_prevent with stage=%s faulted_lines=%s load_scale=%.2f max_rho=%.4f",
+        stage,
+        faulted_lines,
+        load_scale,
         float(max(obs.rho)),
     )
-    return obs, {"faulted_lines": list(line_pair), "load_scale": 1.15}
+    return obs, {
+        "faulted_lines": faulted_lines,
+        "load_scale": load_scale,
+        "curriculum_episode": _curriculum_episode(difficulty_level),
+        "curriculum_stage": stage,
+    }
 
 
 def _convert(obs) -> GridObservation:

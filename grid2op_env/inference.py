@@ -16,9 +16,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from grid2op_env import BaselineRequest, BaselineScores, GridAction, GridEnv
-from grid2op_env.graph_analysis import analyze_grid_topology
 from grid2op_env.models import GridObservation, TaskId
-from grid2op_env.server.tasks import TASKS, inject_scenario_raw
+from grid2op_env.server.tasks import TASKS
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -80,125 +79,6 @@ class SimulationOutcome:
     raw_result: dict[str, Any]
 
 
-class LocalSimulationSandbox:
-    """Local Grid2Op mirror used for hypothetical action evaluation."""
-
-    def __init__(self, task_id: TaskId, seed: int | None, env_name: str = "l2rpn_case14_sandbox"):
-        import grid2op
-
-        self._env = grid2op.make(env_name)
-        self._task_id = task_id
-        self._seed = seed
-        self._raw_obs, self.scenario_metadata = inject_scenario_raw(
-            self._env,
-            task_id,
-            seed=seed,
-        )
-        self.n_line = int(self._env.n_line)
-        self.n_gen = int(self._env.n_gen)
-        self.n_sub = int(self._env.n_sub)
-        self.line_or_to_subid = [int(x) for x in self._env.line_or_to_subid.tolist()]
-        self.line_ex_to_subid = [int(x) for x in self._env.line_ex_to_subid.tolist()]
-
-    def simulate_candidates(
-        self,
-        candidates: Sequence[tuple[GridAction, dict[str, Any]]],
-    ) -> list[SimulationOutcome]:
-        outcomes: list[SimulationOutcome] = []
-        for index, (action, trace) in enumerate(candidates, start=1):
-            try:
-                sim_obs, sim_reward, sim_done, sim_info = self._raw_obs.simulate(
-                    to_grid2op_action(self._env, action)
-                )
-                exceptions = [str(exc) for exc in sim_info.get("exception", [])]
-                max_rho = float(max(sim_obs.rho)) if len(sim_obs.rho) else 0.0
-                overloaded = [
-                    idx for idx, rho in enumerate(sim_obs.rho.tolist()) if float(rho) > 1.0
-                ]
-                disconnected = [
-                    idx for idx, status in enumerate(sim_obs.line_status.tolist()) if not bool(status)
-                ]
-                outcomes.append(
-                    SimulationOutcome(
-                        candidate_index=index,
-                        action=action,
-                        trace=trace,
-                        done=bool(sim_done),
-                        simulated_reward=float(sim_reward),
-                        max_rho=max_rho,
-                        overloaded_line_ids=overloaded,
-                        disconnected_lines=disconnected,
-                        convergence_failed=bool(sim_info.get("is_illegal") or sim_info.get("is_ambiguous")),
-                        exceptions=exceptions,
-                        raw_result={
-                            "done": bool(sim_done),
-                            "simulated_reward": float(sim_reward),
-                            "max_rho": max_rho,
-                            "overloaded_line_ids": overloaded,
-                            "disconnected_lines": disconnected,
-                            "exceptions": exceptions,
-                            "timestep_overflow": [int(x) for x in sim_obs.timestep_overflow.tolist()],
-                        },
-                    )
-                )
-            except Exception as exc:  # pragma: no cover - simulator failures are runtime-specific
-                outcomes.append(
-                    SimulationOutcome(
-                        candidate_index=index,
-                        action=action,
-                        trace=trace,
-                        done=True,
-                        simulated_reward=-10.0,
-                        max_rho=999.0,
-                        overloaded_line_ids=[],
-                        disconnected_lines=[],
-                        convergence_failed=True,
-                        exceptions=[str(exc)],
-                        raw_result={
-                            "done": True,
-                            "simulated_reward": -10.0,
-                            "max_rho": 999.0,
-                            "overloaded_line_ids": [],
-                            "disconnected_lines": [],
-                            "exceptions": [str(exc)],
-                            "timestep_overflow": [],
-                        },
-                    )
-                )
-        return outcomes
-
-    def apply(self, action: GridAction) -> None:
-        obs, _, _, _ = self._env.step(to_grid2op_action(self._env, action))
-        self._raw_obs = obs
-
-    def compare_with_remote(
-        self,
-        remote_observation: GridObservation,
-        task_id: TaskId,
-        seed: int | None,
-        step_index: int,
-    ) -> None:
-        local_max = float(max(self._raw_obs.rho)) if len(self._raw_obs.rho) else 0.0
-        remote_max = float(max(remote_observation.rho)) if remote_observation.rho else 0.0
-        delta = abs(local_max - remote_max)
-        logger.info(
-            "Mirror alignment task_id=%s seed=%s step=%s local_max_rho=%.4f remote_max_rho=%.4f delta=%.6f",
-            task_id,
-            seed,
-            step_index,
-            local_max,
-            remote_max,
-            delta,
-        )
-
-    def close(self) -> None:
-        self._env.close()
-
-    @property
-    def raw_observation(self):
-        return self._raw_obs
-
-
 def run_baseline_suite(
     base_url: str,
     config: BaselineRequest | None = None,
@@ -238,15 +118,23 @@ def run_baseline_suite(
 
     with GridEnv(base_url=base_url).sync() as env:
         task_metrics: Dict[TaskId, list[dict[str, Any]]] = {task_id: [] for task_id in TASKS}
+        task_episode_counts: Dict[TaskId, int] = {task_id: 0 for task_id in TASKS}
         for task_id, task in TASKS.items():
             for seed in range(llm_config.seed_start, llm_config.seed_start + llm_config.num_seeds):
+                task_episode_counts[task_id] += 1
+                curriculum_episode = task_episode_counts[task_id]
                 logger.info(
-                    "Baseline episode start task_id=%s seed=%s max_steps=%s",
+                    "Baseline episode start task_id=%s seed=%s curriculum_episode=%s max_steps=%s",
                     task_id,
                     seed,
+                    curriculum_episode,
                     task.max_steps,
                 )
-                result = env.reset(task_id=task_id, seed=seed)
+                result = env.reset(
+                    task_id=task_id,
+                    seed=seed,
+                    difficulty_level=curriculum_episode,
+                )
                 state = env.state()
                 logger.info(
                     "Initial state task_id=%s seed=%s episode_id=%s scenario_metadata=%s max_rho=%.4f disconnected=%s",
@@ -257,67 +145,57 @@ def run_baseline_suite(
                     float(max(result.observation.rho)) if result.observation.rho else 0.0,
                     [idx for idx, status in enumerate(result.observation.line_status) if not status],
                 )
-                sandbox = LocalSimulationSandbox(task_id=task_id, seed=seed)
 
                 step_idx = 0
                 do_nothing_steps = 0
                 raw_outputs: list[dict[str, Any]] = []
-                try:
-                    while not result.done and step_idx < task.max_steps:
-                        action, planning_trace = choose_action_with_qwen(
-                            client=client,
-                            task_id=task_id,
-                            observation=result.observation,
-                            sandbox=sandbox,
-                            step_count=step_idx,
-                            max_steps=task.max_steps,
-                            include_task_description=(step_idx == 0),
-                            llm_config=llm_config,
-                        )
-                        raw_outputs.append(
-                            {
-                                "step": step_idx + 1,
-                                "proposal_prompt": planning_trace["proposal_prompt"],
-                                "proposal_raw_output": planning_trace["proposal_raw_output"],
-                                "proposal_trace": planning_trace["proposal_trace"],
-                                "graph_intelligence": planning_trace["graph_intelligence"],
-                                "simulations": planning_trace["simulations"],
-                                "final_prompt": planning_trace["final_prompt"],
-                                "final_raw_output": planning_trace["final_raw_output"],
-                                "final_trace": planning_trace["final_trace"],
-                                "selected_action": action.model_dump(),
-                                "observation_summary": {
-                                    "max_rho": max(result.observation.rho) if result.observation.rho else 0.0,
-                                    "disconnected_lines": [
-                                        idx
-                                        for idx, status in enumerate(result.observation.line_status)
-                                        if not status
-                                    ],
-                                    "timestep_overflow": result.observation.timestep_overflow,
-                                },
-                            }
-                        )
-                        if action.do_nothing:
-                            do_nothing_steps += 1
-                        logger.info(
-                            "Baseline action task_id=%s seed=%s step=%s action=%s trace=%s",
-                            task_id,
-                            seed,
-                            step_idx + 1,
-                            action.model_dump(),
-                            planning_trace["final_trace"],
-                        )
-                        result = env.step(action)
-                        sandbox.apply(action)
-                        step_idx += 1
-                        sandbox.compare_with_remote(
-                            result.observation,
-                            task_id=task_id,
-                            seed=seed,
-                            step_index=step_idx,
-                        )
-                finally:
-                    sandbox.close()
+                while not result.done and step_idx < task.max_steps:
+                    action, planning_trace = choose_action_with_qwen(
+                        client=client,
+                        env=env,
+                        episode_id=state.episode_id,
+                        task_id=task_id,
+                        observation=result.observation,
+                        step_count=step_idx,
+                        max_steps=task.max_steps,
+                        include_task_description=(step_idx == 0),
+                        llm_config=llm_config,
+                    )
+                    raw_outputs.append(
+                        {
+                            "step": step_idx + 1,
+                            "proposal_prompt": planning_trace["proposal_prompt"],
+                            "proposal_raw_output": planning_trace["proposal_raw_output"],
+                            "proposal_trace": planning_trace["proposal_trace"],
+                            "graph_intelligence": planning_trace["graph_intelligence"],
+                            "simulations": planning_trace["simulations"],
+                            "final_prompt": planning_trace["final_prompt"],
+                            "final_raw_output": planning_trace["final_raw_output"],
+                            "final_trace": planning_trace["final_trace"],
+                            "selected_action": action.model_dump(),
+                            "observation_summary": {
+                                "max_rho": max(result.observation.rho) if result.observation.rho else 0.0,
+                                "disconnected_lines": [
+                                    idx
+                                    for idx, status in enumerate(result.observation.line_status)
+                                    if not status
+                                ],
+                                "timestep_overflow": result.observation.timestep_overflow,
+                            },
+                        }
+                    )
+                    if action.do_nothing:
+                        do_nothing_steps += 1
+                    logger.info(
+                        "Baseline action task_id=%s seed=%s step=%s action=%s trace=%s",
+                        task_id,
+                        seed,
+                        step_idx + 1,
+                        action.model_dump(),
+                        planning_trace["final_trace"],
+                    )
+                    result = env.step(action)
+                    step_idx += 1
 
                 state = env.state()
                 logger.info(
@@ -343,6 +221,7 @@ def run_baseline_suite(
                 record = {
                     "task_id": task_id,
                     "seed": seed,
+                    "curriculum_episode": curriculum_episode,
                     "score": episode_score,
                     "episode_length": episode_length,
                     "done": state.done,
@@ -397,20 +276,18 @@ def run_baseline_suite(
 
 def choose_action_with_qwen(
     client: OpenAI,
+    env: GridEnv,
+    episode_id: str,
     task_id: TaskId,
     observation: GridObservation,
-    sandbox: LocalSimulationSandbox,
     step_count: int,
     max_steps: int,
     include_task_description: bool,
     llm_config: BaselineConfig,
 ) -> tuple[GridAction, dict[str, Any]]:
-    graph_intelligence = analyze_grid_topology(
-        sandbox.raw_observation,
-        line_or_to_subid=sandbox.line_or_to_subid,
-        line_ex_to_subid=sandbox.line_ex_to_subid,
-        n_sub=sandbox.n_sub,
-    )
+    planning_context = env.planning_context(episode_id)
+    graph_intelligence = planning_context.graph_intelligence
+    redispatchable_generators = planning_context.redispatchable_generators
     logger.info(
         "Graph intelligence task_id=%s step=%s bridges=%s safe_disconnect=%s central_buses=%s islanded=%s corridor=%s stressed=%s",
         task_id,
@@ -426,6 +303,7 @@ def choose_action_with_qwen(
         task_id=task_id,
         observation=observation,
         graph_intelligence=graph_intelligence,
+        redispatchable_generators=redispatchable_generators,
         step_count=step_count,
         max_steps=max_steps,
         include_task_description=include_task_description,
@@ -455,10 +333,30 @@ def choose_action_with_qwen(
     )
     proposal_candidates, proposal_trace = parse_candidate_proposals(
         proposal_raw_output,
-        n_line=sandbox.n_line,
-        n_gen=sandbox.n_gen,
+        n_line=len(observation.line_status),
+        n_gen=len(observation.gen_p),
+        redispatchable_generators=redispatchable_generators,
     )
-    simulations = sandbox.simulate_candidates(proposal_candidates)
+    simulation_response = env.simulate_candidates(
+        episode_id,
+        [action for action, _ in proposal_candidates],
+    )
+    simulations = [
+        SimulationOutcome(
+            candidate_index=index,
+            action=result.action,
+            trace=proposal_candidates[index - 1][1],
+            done=result.done,
+            simulated_reward=result.simulated_reward,
+            max_rho=result.max_rho,
+            overloaded_line_ids=result.overloaded_line_ids,
+            disconnected_lines=result.disconnected_lines,
+            convergence_failed=result.convergence_failed,
+            exceptions=result.exceptions,
+            raw_result=result.raw_result,
+        )
+        for index, result in enumerate(simulation_response.results, start=1)
+    ]
     logger.info(
         "Simulation results task_id=%s step=%s results=%s",
         task_id,
@@ -508,8 +406,8 @@ def choose_action_with_qwen(
     action, final_trace = select_final_action(
         final_raw_output=final_raw_output,
         simulations=simulations,
-        n_line=sandbox.n_line,
-        n_gen=sandbox.n_gen,
+        n_line=len(observation.line_status),
+        n_gen=len(observation.gen_p),
     )
     return action, {
         "proposal_prompt": proposal_prompt,
@@ -527,6 +425,7 @@ def build_proposal_prompt(
     task_id: TaskId,
     observation: GridObservation,
     graph_intelligence: dict[str, Any],
+    redispatchable_generators: Sequence[int],
     step_count: int,
     max_steps: int,
     include_task_description: bool,
@@ -553,6 +452,7 @@ def build_proposal_prompt(
         f"max_rho={max(observation.rho):.3f}" if observation.rho else "max_rho=0.0",
         f"line_count={line_count}",
         f"generator_count={gen_count}",
+        "redispatchable_generators=" + json.dumps([int(x) for x in redispatchable_generators], separators=(",", ":")),
         "stressed_lines=" + json.dumps(stressed_lines, separators=(",", ":")),
         "disconnected_lines=" + json.dumps(disconnected, separators=(",", ":")),
         "generators=" + json.dumps(generator_summary, separators=(",", ":")),
@@ -562,7 +462,7 @@ def build_proposal_prompt(
     if include_task_description:
         lines.append("task_description=" + TASKS[task_id].description)
     lines.append(
-        'example_1={"candidates":[{"action_type":"disconnect_line","line_id":10,"gen_id":null,"delta_mw":null,"reason":"line 10 appears to be the stress bottleneck"},{"action_type":"redispatch","line_id":null,"gen_id":2,"delta_mw":10.0,"reason":"increase generator 2 to alter flows"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"keep a safe fallback"}]}'
+        'example_1={"candidates":[{"action_type":"disconnect_line","line_id":10,"gen_id":null,"delta_mw":null,"reason":"line 10 appears to be the stress bottleneck"},{"action_type":"redispatch","line_id":null,"gen_id":0,"delta_mw":10.0,"reason":"increase a redispatchable generator to alter flows"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"keep a safe fallback"}]}'
     )
     lines.append(
         'example_2={"candidates":[{"action_type":"reconnect_line","line_id":0,"gen_id":null,"delta_mw":null,"reason":"restore missing transfer capacity"},{"action_type":"redispatch","line_id":null,"gen_id":1,"delta_mw":-10.0,"reason":"reduce generator 1 output to ease a corridor"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"baseline if both interventions are dangerous"}]}'
@@ -633,6 +533,7 @@ def parse_candidate_proposals(
     content: str,
     n_line: int,
     n_gen: int,
+    redispatchable_generators: Sequence[int] | None = None,
 ) -> tuple[list[tuple[GridAction, dict[str, Any]]], dict[str, Any]]:
     payload = parse_json_action(content)
     raw_candidates = payload.get("candidates", [])
@@ -641,7 +542,12 @@ def parse_candidate_proposals(
         for item in raw_candidates[:3]:
             if isinstance(item, dict):
                 candidates.append(
-                    validate_baseline_action(item, n_line=n_line, n_gen=n_gen)
+                    validate_baseline_action(
+                        item,
+                        n_line=n_line,
+                        n_gen=n_gen,
+                        redispatchable_generators=redispatchable_generators,
+                    )
                 )
 
     deduped: list[tuple[GridAction, dict[str, Any]]] = []
@@ -696,7 +602,12 @@ def select_final_action(
 
     action_payload = payload.get("action")
     if isinstance(action_payload, dict):
-        action, trace = validate_baseline_action(action_payload, n_line=n_line, n_gen=n_gen)
+        action, trace = validate_baseline_action(
+            action_payload,
+            n_line=n_line,
+            n_gen=n_gen,
+            redispatchable_generators=None,
+        )
         for outcome in simulations:
             if actions_equivalent(action, outcome.action):
                 return outcome.action, {
@@ -766,7 +677,13 @@ def validate_baseline_action(
     payload: Dict[str, Any],
     n_line: int,
     n_gen: int,
+    redispatchable_generators: Sequence[int] | None = None,
 ) -> tuple[GridAction, dict[str, Any]]:
+    allowed_redispatch = (
+        {int(gen_id) for gen_id in redispatchable_generators}
+        if redispatchable_generators is not None
+        else set(range(n_gen))
+    )
     action_type = payload.get("action_type")
     if payload.get("do_nothing") or action_type == "do_nothing":
         return GridAction(do_nothing=True), {"decision": "do_nothing", "reason": payload.get("reason", "explicit_do_nothing")}
@@ -824,7 +741,12 @@ def validate_baseline_action(
         except (TypeError, ValueError):
             gen_id = None
             delta = None
-        if gen_id is not None and 0 <= gen_id < n_gen and delta is not None:
+        if (
+            gen_id is not None
+            and 0 <= gen_id < n_gen
+            and gen_id in allowed_redispatch
+            and delta is not None
+        ):
             return (
                 GridAction(redispatch={gen_id: delta}, line_set={}),
                 {"decision": "redispatch", "reason": payload.get("reason", "")},
@@ -838,7 +760,7 @@ def validate_baseline_action(
             delta = float(value)
         except (TypeError, ValueError):
             continue
-        if 0 <= gen_id < n_gen:
+        if 0 <= gen_id < n_gen and gen_id in allowed_redispatch:
             valid_redispatch[gen_id] = delta
 
     if not valid_line_set and not valid_redispatch:
@@ -847,18 +769,6 @@ def validate_baseline_action(
         GridAction(line_set=valid_line_set, redispatch=valid_redispatch),
         {"decision": "legacy_payload", "reason": payload.get("reason", "")},
     )
-
-
-def to_grid2op_action(env, action: GridAction):
-    if action.do_nothing:
-        return env.action_space()
-
-    payload = {}
-    if action.line_set:
-        payload["set_line_status"] = sorted((int(k), int(v)) for k, v in action.line_set.items())
-    if action.redispatch:
-        payload["redispatch"] = sorted((int(k), float(v)) for k, v in action.redispatch.items())
-    return env.action_space(payload)
 
 
 def write_evaluation_outputs(
@@ -916,6 +826,7 @@ def write_evaluation_outputs(
             fieldnames=[
                 "task_id",
                 "seed",
+                "curriculum_episode",
                 "score",
                 "episode_length",
                 "done",
@@ -929,6 +840,7 @@ def write_evaluation_outputs(
                 {
                     "task_id": record["task_id"],
                     "seed": record["seed"],
+                    "curriculum_episode": record["curriculum_episode"],
                     "score": record["score"],
                     "episode_length": record["episode_length"],
                     "done": record["done"],

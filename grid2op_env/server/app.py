@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from fastapi import Request
 from openenv.core.env_server.http_server import create_app
+from fastapi import HTTPException
 
 try:
     from ..models import (
@@ -12,6 +13,10 @@ try:
         GraderResponse,
         GridAction,
         GridObservation,
+        PlanningContextRequest,
+        PlanningContextResponse,
+        SimulationRequest,
+        SimulationResponse,
         TaskListResponse,
     )
     from .graders import grade_episode
@@ -26,6 +31,10 @@ except ImportError:
         GraderResponse,
         GridAction,
         GridObservation,
+        PlanningContextRequest,
+        PlanningContextResponse,
+        SimulationRequest,
+        SimulationResponse,
         TaskListResponse,
     )
     from server.graders import grade_episode
@@ -74,6 +83,31 @@ def run_baseline_route(payload: BaselineRequest, request: Request) -> BaselineSc
     base_url = str(request.base_url).rstrip("/")
     logger.info("Serving /baseline model=%s base_url=%s", payload.model, base_url)
     return run_baseline_suite(base_url=base_url, config=payload)
+
+
+@app.post("/planning_context", response_model=PlanningContextResponse)
+def post_planning_context(payload: PlanningContextRequest) -> PlanningContextResponse:
+    env = GridEnvironment.get_active_instance(payload.episode_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail=f"Unknown episode_id: {payload.episode_id}")
+    logger.info("Serving /planning_context episode_id=%s", payload.episode_id)
+    return env.get_planning_context()
+
+
+@app.post("/simulate", response_model=SimulationResponse)
+def post_simulate(payload: SimulationRequest) -> SimulationResponse:
+    env = GridEnvironment.get_active_instance(payload.episode_id)
+    if env is None:
+        raise HTTPException(status_code=404, detail=f"Unknown episode_id: {payload.episode_id}")
+    logger.info(
+        "Serving /simulate episode_id=%s candidate_count=%s",
+        payload.episode_id,
+        len(payload.actions),
+    )
+    return SimulationResponse(
+        episode_id=payload.episode_id,
+        results=env.simulate_actions(payload.actions),
+    )
 
 
 def main(host: str = "0.0.0.0", port: int = 7860) -> None:

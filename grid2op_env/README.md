@@ -2,6 +2,8 @@
 
 Standalone OpenEnv environment package for the full `PROJECT.md` design.
 
+The current planner uses server-side simulation on the live Grid2Op session. It does not rely on a replayed local mirror.
+
 ## File structure
 
 ```text
@@ -55,8 +57,25 @@ Supporting files outside the minimum template remain for quality and verificatio
 - Reset-time scenario injection and retry logic for non-convergent starts
 - Shaped reward, episode logging, and deterministic graders
 - OpenEnv WebSocket interface plus `/tasks`, `/grader`, and `/baseline`
+- Server-side planner support via:
+  - `POST /planning_context`
+  - `POST /simulate`
 - Qwen3.5 baseline using the Chat Completions API
 - Local Docker workflow with dataset pre-download
+
+## Planner architecture
+
+`inference.py` now uses this flow:
+
+1. `reset()` live episode
+2. `state()` to obtain `episode_id`
+3. `planning_context(episode_id)` for graph intelligence and redispatchable generators
+4. LLM proposes 3 candidate actions
+5. `simulate_candidates(episode_id, actions)` on the live server session
+6. LLM selects the safest simulated action
+7. `step(action)`
+
+This avoids the old replay-mirror drift problem.
 
 ## Local Docker workflow
 
@@ -106,3 +125,17 @@ EOF
 
 env UV_CACHE_DIR=/tmp/uv-cache uv run --no-dev inference.py
 ```
+
+## Important runtime note
+
+After changing server code, restart the Grid2Op server before running `inference.py`. The planner depends on the live server routes `/planning_context` and `/simulate`.
+
+## Latest verified result
+
+Latest saved run:
+
+- `single_fault`: `0.752`
+- `n_minus_1`: `1.0`
+- `cascade_prevent`: `1.0`
+
+This confirms the server-side simulation path is active. One benchmark caveat remains: the latest `cascade_prevent` score was achieved on the easier early curriculum slice of the 5-seed run, not yet on the hardest late curriculum stages.

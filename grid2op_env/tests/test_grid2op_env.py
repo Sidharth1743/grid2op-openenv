@@ -7,6 +7,7 @@ from grid2op_env.inference import (
     SimulationOutcome,
 )
 from grid2op_env.graph_analysis import analyze_grid_topology
+from grid2op_env.server.tasks import _cascade_profile, replay_scenario_raw
 from grid2op_env.server.graders import (
     grade_cascade_prevent,
     grade_n_minus_1,
@@ -53,7 +54,8 @@ def test_graders_are_deterministic():
             reward=1.0,
             raw_reward=0.0,
             done=False,
-            max_rho=0.85,
+            max_rho=0.75,
+            all_lines_below_80=True,
             all_lines_below_90=True,
             all_lines_below_100=True,
         )
@@ -99,11 +101,16 @@ def test_candidate_proposals_are_parsed_and_deduped():
       ]
     }
     """
-    candidates, trace = parse_candidate_proposals(payload, n_line=20, n_gen=6)
+    candidates, trace = parse_candidate_proposals(
+        payload,
+        n_line=20,
+        n_gen=6,
+        redispatchable_generators=[0, 1, 5],
+    )
     assert len(candidates) == 3
     assert trace["parsed_candidate_count"] == 3
     assert candidates[0][0].line_set == {0: 1}
-    assert candidates[1][0].redispatch == {2: 10.0}
+    assert candidates[1][0].do_nothing is True
     assert candidates[2][0].do_nothing or candidates[2][0].redispatch == {0: 10.0}
 
 
@@ -168,5 +175,90 @@ def test_graph_analysis_returns_expected_keys():
         assert summary["flow_clusters"]["export_buses"]
         assert summary["flow_clusters"]["import_buses"]
         assert "unknown" not in summary["congestion_corridor"]
+    finally:
+        env.close()
+
+
+def test_curriculum_metadata_progression():
+    import grid2op
+
+    env = grid2op.make("l2rpn_case14_sandbox")
+    try:
+        _, single_mild = inject_scenario_raw(env, "single_fault", seed=0, difficulty_level=1)
+        _, single_severe = inject_scenario_raw(env, "single_fault", seed=0, difficulty_level=8)
+        _, cascade_easy = inject_scenario_raw(env, "cascade_prevent", seed=0, difficulty_level=2)
+        _, cascade_hard = inject_scenario_raw(env, "cascade_prevent", seed=0, difficulty_level=10)
+
+        assert single_mild["curriculum_stage"] == "mild"
+        assert single_severe["curriculum_stage"] == "severe"
+        assert single_mild["target_rho_range"] == [0.85, 0.9]
+        assert single_severe["target_rho_range"] == [0.95, 1.0]
+
+        assert cascade_easy["curriculum_stage"] == "one_line_5pct"
+        assert cascade_easy["load_scale"] == 1.05
+        assert len(cascade_easy["faulted_lines"]) == 1
+
+        assert cascade_hard["curriculum_stage"] == "two_lines_15pct"
+        assert cascade_hard["load_scale"] == 1.15
+        assert len(cascade_hard["faulted_lines"]) == 2
+    finally:
+        env.close()
+
+
+def test_replay_scenario_raw_matches_single_fault_metadata():
+    import grid2op
+
+    env = grid2op.make("l2rpn_case14_sandbox")
+    mirror = grid2op.make("l2rpn_case14_sandbox")
+    try:
+        raw_obs, metadata = inject_scenario_raw(env, "single_fault", seed=3, difficulty_level=4)
+        replayed = replay_scenario_raw(
+            mirror,
+            task_id="single_fault",
+            seed=3,
+            scenario_metadata=metadata,
+        )
+        assert max(raw_obs.rho.tolist()) == max(replayed.rho.tolist())
+        assert raw_obs.line_status.tolist() == replayed.line_status.tolist()
+    finally:
+        env.close()
+        mirror.close()
+
+
+def test_cascade_profile_is_deterministic_for_same_seed_and_difficulty():
+    first = _cascade_profile(difficulty_level=10, seed=7)
+    second = _cascade_profile(difficulty_level=10, seed=7)
+    assert first == second
+
+
+def test_handle_convergence_failure_without_last_obs_does_not_raise():
+    env = GridEnvironment()
+    try:
+        env._last_obs = None
+        fallback = env._handle_convergence_failure(RuntimeError("boom"))
+        assert fallback.done is True
+        assert fallback.metadata["convergence_failed"] is True
+    finally:
+        env.close()
+
+
+def test_planning_context_and_server_side_simulation_use_active_episode():
+    env = GridEnvironment()
+    try:
+        obs = env.reset(task_id="single_fault", seed=0, difficulty_level=1)
+        episode_id = env.state.episode_id
+        active = GridEnvironment.get_active_instance(episode_id)
+        assert active is env
+
+        planning = env.get_planning_context()
+        assert planning.episode_id == episode_id
+        assert planning.graph_intelligence
+        assert planning.redispatchable_generators == [0, 1, 5]
+
+        results = env.simulate_actions([GridAction(do_nothing=True)])
+        assert len(results) == 1
+        assert results[0].action.do_nothing is True
+        assert results[0].max_rho >= 0.0
+        assert isinstance(obs.rho, list)
     finally:
         env.close()
