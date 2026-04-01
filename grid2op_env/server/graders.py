@@ -24,10 +24,33 @@ def grade_episode(task_id: TaskId, episode_log: Iterable[EpisodeStepLog]) -> flo
 
 
 def grade_single_fault(episode_log: list[EpisodeStepLog]) -> float:
+    if not episode_log:
+        return 0.0
+
+    max_steps = 10
+    survival_ratio = min(1.0, len(episode_log) / max_steps)
+    achieved_target = any(entry.all_lines_below_target or entry.all_lines_below_80 for entry in episode_log)
+    target_bonus = 0.5 if achieved_target else 0.0
+    legacy_success_score = 0.0
     for entry in episode_log:
-        if entry.all_lines_below_80:
-            return round(max(0.0, 1.0 - (0.08 * max(0, entry.step - 1))), 6)
-    return 0.0
+        if entry.all_lines_below_target or entry.all_lines_below_80:
+            legacy_success_score = round(max(0.0, 1.0 - (0.08 * max(0, entry.step - 1))), 6)
+            break
+
+    final_entry = episode_log[-1]
+    final_rho = float(final_entry.max_rho)
+    target_threshold = float(final_entry.single_fault_target_threshold or 0.8)
+    if final_rho < target_threshold:
+        final_bonus = 0.3
+    elif final_rho < target_threshold + 0.05:
+        final_bonus = 0.15
+    elif final_rho < target_threshold + 0.10:
+        final_bonus = 0.05
+    else:
+        final_bonus = 0.0
+
+    score = (survival_ratio * 0.7) + target_bonus + final_bonus
+    return round(min(1.0, max(0.0, score, legacy_success_score)), 6)
 
 
 def grade_n_minus_1(episode_log: list[EpisodeStepLog], max_steps: int = 20) -> float:

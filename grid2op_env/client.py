@@ -42,6 +42,7 @@ class GridEnv(EnvClient[GridAction, GridObservation, GridState]):
             load_p=obs_data.get("load_p", []),
             line_status=obs_data.get("line_status", []),
             timestep_overflow=obs_data.get("timestep_overflow", []),
+            sensitivity_guidance=obs_data.get("sensitivity_guidance", []),
             done=payload.get("done", False),
             reward=payload.get("reward", 0.0),
             metadata=obs_data.get("metadata", {}),

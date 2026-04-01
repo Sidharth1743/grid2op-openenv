@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 
 TaskId = Literal["single_fault", "n_minus_1", "cascade_prevent"]
+ScenarioMode = Literal["curriculum", "benchmark"]
 
 
 class GridAction(Action):
@@ -34,6 +35,7 @@ class GridObservation(Observation):
     load_p: List[float] = Field(default_factory=list)
     line_status: List[bool] = Field(default_factory=list)
     timestep_overflow: List[int] = Field(default_factory=list)
+    sensitivity_guidance: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class EpisodeStepLog(BaseModel):
@@ -46,6 +48,8 @@ class EpisodeStepLog(BaseModel):
     done: bool
     max_rho: float
     overloaded_line_ids: List[int] = Field(default_factory=list)
+    single_fault_target_threshold: float = 0.8
+    all_lines_below_target: bool = False
     all_lines_below_80: bool = False
     all_lines_below_90: bool = False
     all_lines_below_100: bool = False
@@ -108,6 +112,7 @@ class BaselineRequest(BaseModel):
     enable_thinking: bool = False
     num_seeds: int = Field(default=5, ge=1)
     seed_start: int = Field(default=0, ge=0)
+    scenario_mode: ScenarioMode = Field(default="benchmark")
 
 
 class BaselineScores(BaseModel):
@@ -142,7 +147,18 @@ class PlanningContextRequest(BaseModel):
     episode_id: str
 
 
+class RedispatchGeneratorContext(BaseModel):
+    gen_id: int
+    p_mw: float
+    max_ramp_up: float
+    max_ramp_down: float
+    allowed_delta_min: float
+    allowed_delta_max: float
+    allowed_deltas: List[float] = Field(default_factory=list)
+
+
 class PlanningContextResponse(BaseModel):
     episode_id: str
     graph_intelligence: Dict[str, Any] = Field(default_factory=dict)
     redispatchable_generators: List[int] = Field(default_factory=list)
+    redispatch_generators: List[RedispatchGeneratorContext] = Field(default_factory=list)

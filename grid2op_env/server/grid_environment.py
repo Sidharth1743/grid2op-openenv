@@ -18,6 +18,8 @@ try:
         GridObservation,
         GridState,
         PlanningContextResponse,
+        RedispatchGeneratorContext,
+        ScenarioMode,
         SimulationResult,
         TaskId,
     )
@@ -30,6 +32,8 @@ except ImportError:
         GridObservation,
         GridState,
         PlanningContextResponse,
+        RedispatchGeneratorContext,
+        ScenarioMode,
         SimulationResult,
         TaskId,
     )
@@ -84,6 +88,8 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         episode_id: str | None = None,
         task_id: TaskId = "single_fault",
         difficulty_level: int | None = None,
+        scenario_mode: ScenarioMode = "curriculum",
+        benchmark_tier: str | None = None,
         **kwargs,
     ) -> GridObservation:
         del kwargs
@@ -108,6 +114,8 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 task_id,
                 seed=seed,
                 difficulty_level=difficulty_level,
+                scenario_mode=scenario_mode,
+                benchmark_tier=benchmark_tier,
             )
             observation = self._convert_observation(
                 raw_observation,
@@ -196,10 +204,14 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
 
             self._state.step_count += 1
             reached_time_limit = self._state.step_count >= self._max_steps
+            single_fault_target_threshold = self._single_fault_success_threshold()
+            all_lines_below_target = bool(observation.rho) and all(
+                rho < single_fault_target_threshold for rho in observation.rho
+            )
             all_lines_below_80 = bool(observation.rho) and all(rho < 0.8 for rho in observation.rho)
             topology_change_count = self._compute_topology_change_count(previous_observation, observation)
             auto_trip_detected = self._detect_auto_trip(previous_observation, observation, sanitized_action)
-            if self._task_id == "single_fault" and all_lines_below_80:
+            if self._task_id == "single_fault" and all_lines_below_target:
                 done = True
             else:
                 done = bool(env_done or reached_time_limit or observation.done)
@@ -211,6 +223,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 invalid_penalty=invalid_penalty,
                 auto_trip_detected=auto_trip_detected,
                 topology_change_count=topology_change_count,
+                action=sanitized_action,
             )
             observation.reward = shaped_reward
             observation.done = done
@@ -284,10 +297,24 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             redispatchable_generators = [
                 idx for idx, allowed in enumerate(self._env.gen_redispatchable.tolist()) if bool(allowed)
             ]
+            redispatch_generators = [
+                RedispatchGeneratorContext(
+                    gen_id=int(gen_id),
+                    p_mw=bounds["p_mw"],
+                    max_ramp_up=bounds["max_ramp_up"],
+                    max_ramp_down=bounds["max_ramp_down"],
+                    allowed_delta_min=bounds["allowed_delta_min"],
+                    allowed_delta_max=bounds["allowed_delta_max"],
+                    allowed_deltas=bounds["allowed_deltas"],
+                )
+                for gen_id in redispatchable_generators
+                for bounds in [self._redispatch_bounds_for_gen(gen_id)]
+            ]
             return PlanningContextResponse(
                 episode_id=self._state.episode_id,
                 graph_intelligence=graph_intelligence,
                 redispatchable_generators=redispatchable_generators,
+                redispatch_generators=redispatch_generators,
             )
 
     def simulate_actions(self, actions: list[GridAction]) -> list[SimulationResult]:
@@ -395,8 +422,19 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             idx for idx, allowed in enumerate(self._env.gen_redispatchable.tolist()) if bool(allowed)
         }
         for gen_id, delta in action.redispatch.items():
-            if 0 <= int(gen_id) < int(self._env.n_gen) and int(gen_id) in redispatchable:
-                valid_redispatch[int(gen_id)] = float(delta)
+            gen_id_int = int(gen_id)
+            if 0 <= gen_id_int < int(self._env.n_gen) and gen_id_int in redispatchable:
+                bounds = self._redispatch_bounds_for_gen(gen_id_int)
+                constrained_delta = self._constrain_redispatch_delta(
+                    float(delta),
+                    bounds["allowed_delta_min"],
+                    bounds["allowed_delta_max"],
+                    bounds["allowed_deltas"],
+                )
+                if constrained_delta is None:
+                    invalid_parts.append(f"redispatch[{gen_id}]={delta}")
+                else:
+                    valid_redispatch[gen_id_int] = constrained_delta
             else:
                 invalid_parts.append(f"redispatch[{gen_id}]={delta}")
 
@@ -448,12 +486,15 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             obs.metadata.update(metadata or {})
             return obs
 
+        sensitivity_guidance = self._build_sensitivity_guidance(obs)
+
         return GridObservation(
             rho=[float(x) for x in obs.rho.tolist()],
             gen_p=[float(x) for x in obs.gen_p.tolist()],
             load_p=[float(x) for x in obs.load_p.tolist()],
             line_status=[bool(x) for x in obs.line_status.tolist()],
             timestep_overflow=[int(x) for x in obs.timestep_overflow.tolist()],
+            sensitivity_guidance=sensitivity_guidance,
             reward=reward,
             done=done,
             metadata=metadata or {},
@@ -467,6 +508,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 load_p=[],
                 line_status=[False for _ in range(int(self._env.n_line))],
                 timestep_overflow=[0 for _ in range(int(self._env.n_line))],
+                sensitivity_guidance=[],
                 reward=-10.0,
                 done=True,
                 metadata={"exceptions": [str(exc)], "convergence_failed": True},
@@ -486,8 +528,10 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         invalid_penalty: float,
         auto_trip_detected: bool,
         topology_change_count: int,
+        action: GridAction,
     ) -> float:
         max_rho = float(max(observation.rho)) if observation.rho else 0.0
+        single_fault_target_threshold = self._single_fault_success_threshold()
         overloaded_count = sum(1 for rho in observation.rho if rho > 1.0)
         safe_line_ratio = (
             sum(1 for rho in observation.rho if rho < 0.8) / len(observation.rho)
@@ -497,11 +541,14 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         reward = 0.0
 
         if self._task_id == "single_fault":
-            if observation.rho and all(rho < 0.8 for rho in observation.rho):
+            if observation.rho and all(rho < single_fault_target_threshold for rho in observation.rho):
                 reward += 1.0 / max(1, self._state.step_count)
             reward += 0.05 * max(0.0, 1.0 - max_rho)
             reward -= 0.2 * overloaded_count
-            if reached_time_limit and not all(rho < 0.8 for rho in observation.rho):
+            if not action.do_nothing and action.redispatch:
+                redispatch_amount = sum(abs(float(delta)) for delta in action.redispatch.values())
+                reward -= 0.01 * redispatch_amount
+            if reached_time_limit and not all(rho < single_fault_target_threshold for rho in observation.rho):
                 reward -= 5.0
 
         elif self._task_id == "n_minus_1":
@@ -552,6 +599,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         disconnected = [
             idx for idx, status in enumerate(observation.line_status) if not status
         ]
+        single_fault_target_threshold = self._single_fault_success_threshold()
         return EpisodeStepLog(
             step=self._state.step_count,
             task_id=self._task_id,
@@ -560,6 +608,8 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             done=bool(observation.done),
             max_rho=float(max(observation.rho)) if observation.rho else 0.0,
             overloaded_line_ids=overloaded_ids,
+            single_fault_target_threshold=single_fault_target_threshold,
+            all_lines_below_target=all(rho < single_fault_target_threshold for rho in observation.rho),
             all_lines_below_80=all(rho < 0.8 for rho in observation.rho),
             all_lines_below_90=all(rho < 0.9 for rho in observation.rho),
             all_lines_below_100=all(rho < 1.0 for rho in observation.rho),
@@ -578,6 +628,14 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             action=action.model_dump(),
         )
 
+    def _single_fault_success_threshold(self) -> float:
+        if self._task_id != "single_fault":
+            return 0.8
+        benchmark_tier = self._state.scenario_metadata.get("benchmark_tier")
+        if benchmark_tier == "single_fault_severe":
+            return 0.9
+        return 0.8
+
     def _compute_topology_change_count(
         self,
         previous_observation: GridObservation | None,
@@ -592,6 +650,138 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             for previous, current in zip(previous_status, current_status)
             if bool(previous) != bool(current)
         )
+
+    def _redispatch_bounds_for_gen(
+        self,
+        gen_id: int,
+        obs=None,
+    ) -> dict[str, float | list[float]]:
+        raw_obs = obs if obs is not None else self._last_raw_obs
+        if raw_obs is None:
+            raise RuntimeError("No active raw observation available for redispatch bounds")
+
+        current_p = float(raw_obs.gen_p[gen_id])
+        pmin = float(self._env.gen_pmin[gen_id])
+        pmax = float(self._env.gen_pmax[gen_id])
+        max_ramp_up = float(self._env.gen_max_ramp_up[gen_id])
+        max_ramp_down = float(self._env.gen_max_ramp_down[gen_id])
+        allowed_up = max(0.0, min(max_ramp_up, pmax - current_p))
+        allowed_down = max(0.0, min(max_ramp_down, current_p - pmin))
+        allowed_delta_min = -allowed_down
+        allowed_delta_max = allowed_up
+        allowed_deltas = self._discretize_allowed_deltas(allowed_down, allowed_up)
+        return {
+            "p_mw": round(current_p, 4),
+            "max_ramp_up": round(max_ramp_up, 4),
+            "max_ramp_down": round(max_ramp_down, 4),
+            "allowed_delta_min": round(allowed_delta_min, 4),
+            "allowed_delta_max": round(allowed_delta_max, 4),
+            "allowed_deltas": allowed_deltas,
+        }
+
+    @staticmethod
+    def _discretize_allowed_deltas(allowed_down: float, allowed_up: float) -> list[float]:
+        candidates = [0.0]
+        if allowed_down > 0.0:
+            candidates.extend([-allowed_down, -(allowed_down / 2.0)])
+        if allowed_up > 0.0:
+            candidates.extend([allowed_up / 2.0, allowed_up])
+        deduped = sorted({round(value, 4) for value in candidates if abs(value) > 1e-9})
+        return deduped
+
+    @staticmethod
+    def _constrain_redispatch_delta(
+        delta: float,
+        delta_min: float,
+        delta_max: float,
+        allowed_deltas: list[float],
+    ) -> float | None:
+        if delta_min == 0.0 and delta_max == 0.0:
+            return None
+        clamped = min(max(float(delta), float(delta_min)), float(delta_max))
+        feasible = [float(value) for value in allowed_deltas if delta_min <= float(value) <= delta_max]
+        if feasible:
+            return min(feasible, key=lambda value: (abs(value - clamped), abs(value), value))
+        if abs(clamped) < 1e-9:
+            return None
+        return round(clamped, 4)
+
+    def _build_sensitivity_guidance(self, obs) -> list[dict[str, float | int | str]]:
+        rho_values = [float(value) for value in obs.rho.tolist()]
+        if not rho_values:
+            return []
+
+        current_global_max_rho = max(rho_values)
+        candidates: list[dict[str, float | int | str]] = []
+
+        allow_topology_guidance = self._task_id != "single_fault"
+        if allow_topology_guidance:
+            line_status = [bool(value) for value in obs.line_status.tolist()]
+            for line_id, is_connected in enumerate(line_status):
+                if not is_connected:
+                    continue
+                try:
+                    sim_obs, _, sim_done, sim_info = obs.simulate(
+                        self._env.action_space({"set_line_status": [(line_id, -1)]})
+                    )
+                except CONVERGENCE_EXCEPTIONS:
+                    continue
+
+                sim_exceptions = sim_info.get("exception", [])
+                if bool(sim_done) or sim_exceptions:
+                    continue
+
+                sim_rho_values = [float(value) for value in sim_obs.rho.tolist()]
+                if not sim_rho_values:
+                    continue
+                global_rho_change = float(max(sim_rho_values) - current_global_max_rho)
+                if global_rho_change >= 0.0:
+                    continue
+                candidates.append(
+                    {
+                        "action_type": "disconnect_line",
+                        "target_id": int(line_id),
+                        "expected_rho_change": round(global_rho_change, 6),
+                    }
+                )
+
+        for gen_id, allowed in enumerate(self._env.gen_redispatchable.tolist()):
+            if not bool(allowed):
+                continue
+            bounds = self._redispatch_bounds_for_gen(int(gen_id), obs=obs)
+            for delta in bounds["allowed_deltas"]:
+                delta_value = float(delta)
+                if abs(delta_value) < 1e-9:
+                    continue
+                try:
+                    sim_obs, _, sim_done, sim_info = obs.simulate(
+                        self._env.action_space({"redispatch": [(int(gen_id), delta_value)]})
+                    )
+                except CONVERGENCE_EXCEPTIONS:
+                    continue
+
+                sim_exceptions = sim_info.get("exception", [])
+                if bool(sim_done) or sim_exceptions:
+                    continue
+
+                sim_rho_values = [float(value) for value in sim_obs.rho.tolist()]
+                if not sim_rho_values:
+                    continue
+                global_rho_change = float(max(sim_rho_values) - current_global_max_rho)
+                if global_rho_change >= 0.0:
+                    continue
+                candidates.append(
+                    {
+                        "action_type": "redispatch",
+                        "target_id": int(gen_id),
+                        "expected_rho_change": round(global_rho_change, 6),
+                    }
+                )
+
+        return sorted(
+            candidates,
+            key=lambda item: float(item["expected_rho_change"]),
+        )[:3]
 
     def _detect_auto_trip(
         self,

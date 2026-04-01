@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from grid2op_env.models import EpisodeStepLog, GridAction, GridState
+from grid2op_env.models import (
+    EpisodeStepLog,
+    GridAction,
+    GridObservation,
+    GridState,
+    RedispatchGeneratorContext,
+)
 from grid2op_env.inference import (
+    build_proposal_prompt,
     parse_candidate_proposals,
     select_final_action,
     SimulationOutcome,
+    constrain_redispatch_delta,
 )
 from grid2op_env.graph_analysis import analyze_grid_topology
-from grid2op_env.server.tasks import _cascade_profile, replay_scenario_raw
+from grid2op_env.server.tasks import _cascade_profile, benchmark_tiers_for_task, replay_scenario_raw
 from grid2op_env.server.graders import (
     grade_cascade_prevent,
     grade_n_minus_1,
@@ -23,6 +31,7 @@ def test_task_resets_and_logs():
         for task_id, spec in TASKS.items():
             obs = env.reset(task_id=task_id)
             assert obs.rho
+            assert isinstance(obs.sensitivity_guidance, list)
             assert env.state.task_id == task_id
             assert env.state.max_steps == spec.max_steps
 
@@ -106,12 +115,23 @@ def test_candidate_proposals_are_parsed_and_deduped():
         n_line=20,
         n_gen=6,
         redispatchable_generators=[0, 1, 5],
+        redispatch_generators=[
+            RedispatchGeneratorContext(
+                gen_id=0,
+                p_mw=81.4,
+                max_ramp_up=5.0,
+                max_ramp_down=5.0,
+                allowed_delta_min=-5.0,
+                allowed_delta_max=5.0,
+                allowed_deltas=[-5.0, -2.5, 2.5, 5.0],
+            )
+        ],
     )
     assert len(candidates) == 3
     assert trace["parsed_candidate_count"] == 3
     assert candidates[0][0].line_set == {0: 1}
     assert candidates[1][0].do_nothing is True
-    assert candidates[2][0].do_nothing or candidates[2][0].redispatch == {0: 10.0}
+    assert candidates[2][0].redispatch == {0: -5.0}
 
 
 def test_final_selection_prefers_simulated_candidate():
@@ -191,8 +211,8 @@ def test_curriculum_metadata_progression():
 
         assert single_mild["curriculum_stage"] == "mild"
         assert single_severe["curriculum_stage"] == "severe"
-        assert single_mild["target_rho_range"] == [0.85, 0.9]
-        assert single_severe["target_rho_range"] == [0.95, 1.0]
+        assert single_mild["target_rho_range"] == [0.9, 0.94]
+        assert single_severe["target_rho_range"] == [0.96, 0.99]
 
         assert cascade_easy["curriculum_stage"] == "one_line_5pct"
         assert cascade_easy["load_scale"] == 1.05
@@ -254,6 +274,9 @@ def test_planning_context_and_server_side_simulation_use_active_episode():
         assert planning.episode_id == episode_id
         assert planning.graph_intelligence
         assert planning.redispatchable_generators == [0, 1, 5]
+        assert planning.redispatch_generators
+        assert planning.redispatch_generators[0].allowed_deltas
+        assert planning.redispatch_generators[0].allowed_delta_max > 0.0
 
         results = env.simulate_actions([GridAction(do_nothing=True)])
         assert len(results) == 1
@@ -262,3 +285,95 @@ def test_planning_context_and_server_side_simulation_use_active_episode():
         assert isinstance(obs.rho, list)
     finally:
         env.close()
+
+
+def test_single_fault_observation_includes_negative_sensitivity_guidance():
+    env = GridEnvironment()
+    try:
+        obs = env.reset(task_id="single_fault", seed=0, difficulty_level=1)
+        assert isinstance(obs.sensitivity_guidance, list)
+        assert len(obs.sensitivity_guidance) <= 3
+        for item in obs.sensitivity_guidance:
+            assert item["action_type"] in {"disconnect_line", "redispatch"}
+            assert isinstance(item["target_id"], int)
+            assert float(item["expected_rho_change"]) < 0.0
+    finally:
+        env.close()
+
+
+def test_proposal_prompt_includes_sensitivity_guidance_rule():
+    observation = GridObservation(
+        rho=[0.97, 0.75],
+        gen_p=[80.0, 70.0],
+        load_p=[50.0],
+        line_status=[True, True],
+        timestep_overflow=[0, 0],
+        sensitivity_guidance=[
+            {
+                "action_type": "disconnect_line",
+                "target_id": 1,
+                "expected_rho_change": -0.12,
+            }
+        ],
+    )
+    prompt = build_proposal_prompt(
+        task_id="single_fault",
+        observation=observation,
+        graph_intelligence={},
+        redispatchable_generators=[0],
+        redispatch_generators=[],
+        step_count=0,
+        max_steps=10,
+        include_task_description=True,
+    )
+    assert "CRITICAL PHYSICS RULE" in prompt
+    assert '"action_type":"disconnect_line"' in prompt
+    assert '"expected_rho_change":-0.12' in prompt
+
+
+def test_constrain_redispatch_delta_clamps_to_feasible_discrete_choice():
+    context = RedispatchGeneratorContext(
+        gen_id=0,
+        p_mw=81.4,
+        max_ramp_up=5.0,
+        max_ramp_down=5.0,
+        allowed_delta_min=-5.0,
+        allowed_delta_max=5.0,
+        allowed_deltas=[-5.0, -2.5, 2.5, 5.0],
+    )
+    assert constrain_redispatch_delta(10.0, context) == 5.0
+    assert constrain_redispatch_delta(-9.0, context) == -5.0
+
+
+def test_benchmark_tiers_are_declared_for_each_task():
+    assert benchmark_tiers_for_task("single_fault") == [
+        "single_fault_easy",
+        "single_fault_moderate",
+        "single_fault_severe",
+    ]
+    assert benchmark_tiers_for_task("cascade_prevent") == [
+        "cascade_prevent_easy",
+        "cascade_prevent_medium",
+        "cascade_prevent_hard",
+        "cascade_prevent_extreme",
+    ]
+
+
+def test_benchmark_single_fault_requires_target_match():
+    from grid2op.Exceptions import Grid2OpException
+    from unittest.mock import patch
+
+    with patch("grid2op_env.server.tasks._reset_single_fault", side_effect=Grid2OpException("missed target")):
+        try:
+            inject_scenario_raw(
+                object(),
+                "single_fault",
+                seed=0,
+                max_attempts=1,
+                scenario_mode="benchmark",
+                benchmark_tier="single_fault_moderate",
+            )
+        except Grid2OpException:
+            pass
+        else:
+            raise AssertionError("benchmark single_fault should reject invalid fallback scenarios")

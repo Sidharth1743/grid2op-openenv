@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import argparse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,8 +17,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from grid2op_env import BaselineRequest, BaselineScores, GridAction, GridEnv
-from grid2op_env.models import GridObservation, TaskId
-from grid2op_env.server.tasks import TASKS
+from grid2op_env.models import GridObservation, RedispatchGeneratorContext, ScenarioMode, TaskId
+from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -62,6 +63,7 @@ class BaselineConfig:
     enable_thinking: bool
     num_seeds: int
     seed_start: int
+    scenario_mode: ScenarioMode
 
 
 @dataclass
@@ -82,6 +84,7 @@ class SimulationOutcome:
 def run_baseline_suite(
     base_url: str,
     config: BaselineRequest | None = None,
+    task_ids: Sequence[TaskId] | None = None,
 ) -> BaselineScores:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_paths = prepare_run_paths(timestamp)
@@ -102,9 +105,11 @@ def run_baseline_suite(
         enable_thinking=request_config.enable_thinking,
         num_seeds=request_config.num_seeds,
         seed_start=request_config.seed_start,
+        scenario_mode=request_config.scenario_mode,
     )
 
     client = OpenAI()
+    selected_task_ids = list(task_ids) if task_ids is not None else list(TASKS.keys())
     scores: Dict[TaskId, float] = {}
     episode_lengths: Dict[TaskId, int] = {}
     evaluation_records: list[dict[str, Any]] = []
@@ -117,130 +122,138 @@ def run_baseline_suite(
     )
 
     with GridEnv(base_url=base_url).sync() as env:
-        task_metrics: Dict[TaskId, list[dict[str, Any]]] = {task_id: [] for task_id in TASKS}
-        task_episode_counts: Dict[TaskId, int] = {task_id: 0 for task_id in TASKS}
-        for task_id, task in TASKS.items():
-            for seed in range(llm_config.seed_start, llm_config.seed_start + llm_config.num_seeds):
-                task_episode_counts[task_id] += 1
-                curriculum_episode = task_episode_counts[task_id]
-                logger.info(
-                    "Baseline episode start task_id=%s seed=%s curriculum_episode=%s max_steps=%s",
-                    task_id,
-                    seed,
-                    curriculum_episode,
-                    task.max_steps,
-                )
-                result = env.reset(
-                    task_id=task_id,
-                    seed=seed,
-                    difficulty_level=curriculum_episode,
-                )
-                state = env.state()
-                logger.info(
-                    "Initial state task_id=%s seed=%s episode_id=%s scenario_metadata=%s max_rho=%.4f disconnected=%s",
-                    task_id,
-                    seed,
-                    state.episode_id,
-                    state.scenario_metadata,
-                    float(max(result.observation.rho)) if result.observation.rho else 0.0,
-                    [idx for idx, status in enumerate(result.observation.line_status) if not status],
-                )
-
-                step_idx = 0
-                do_nothing_steps = 0
-                raw_outputs: list[dict[str, Any]] = []
-                while not result.done and step_idx < task.max_steps:
-                    action, planning_trace = choose_action_with_qwen(
-                        client=client,
-                        env=env,
-                        episode_id=state.episode_id,
-                        task_id=task_id,
-                        observation=result.observation,
-                        step_count=step_idx,
-                        max_steps=task.max_steps,
-                        include_task_description=(step_idx == 0),
-                        llm_config=llm_config,
-                    )
-                    raw_outputs.append(
-                        {
-                            "step": step_idx + 1,
-                            "proposal_prompt": planning_trace["proposal_prompt"],
-                            "proposal_raw_output": planning_trace["proposal_raw_output"],
-                            "proposal_trace": planning_trace["proposal_trace"],
-                            "graph_intelligence": planning_trace["graph_intelligence"],
-                            "simulations": planning_trace["simulations"],
-                            "final_prompt": planning_trace["final_prompt"],
-                            "final_raw_output": planning_trace["final_raw_output"],
-                            "final_trace": planning_trace["final_trace"],
-                            "selected_action": action.model_dump(),
-                            "observation_summary": {
-                                "max_rho": max(result.observation.rho) if result.observation.rho else 0.0,
-                                "disconnected_lines": [
-                                    idx
-                                    for idx, status in enumerate(result.observation.line_status)
-                                    if not status
-                                ],
-                                "timestep_overflow": result.observation.timestep_overflow,
-                            },
-                        }
-                    )
-                    if action.do_nothing:
-                        do_nothing_steps += 1
+        task_metrics: Dict[TaskId, list[dict[str, Any]]] = {task_id: [] for task_id in selected_task_ids}
+        task_episode_counts: Dict[TaskId, int] = {task_id: 0 for task_id in selected_task_ids}
+        for task_id in selected_task_ids:
+            task = TASKS[task_id]
+            benchmark_tiers = benchmark_tiers_for_task(task_id)
+            for benchmark_tier in benchmark_tiers:
+                for seed in range(llm_config.seed_start, llm_config.seed_start + llm_config.num_seeds):
+                    task_episode_counts[task_id] += 1
+                    curriculum_episode = task_episode_counts[task_id]
                     logger.info(
-                        "Baseline action task_id=%s seed=%s step=%s action=%s trace=%s",
+                        "Baseline episode start task_id=%s seed=%s curriculum_episode=%s benchmark_tier=%s max_steps=%s",
                         task_id,
                         seed,
-                        step_idx + 1,
-                        action.model_dump(),
-                        planning_trace["final_trace"],
+                        curriculum_episode,
+                        benchmark_tier,
+                        task.max_steps,
                     )
-                    result = env.step(action)
-                    step_idx += 1
+                    result = env.reset(
+                        task_id=task_id,
+                        seed=seed,
+                        difficulty_level=curriculum_episode,
+                        scenario_mode=llm_config.scenario_mode,
+                        benchmark_tier=benchmark_tier,
+                    )
+                    state = env.state()
+                    logger.info(
+                        "Initial state task_id=%s seed=%s episode_id=%s scenario_metadata=%s max_rho=%.4f disconnected=%s",
+                        task_id,
+                        seed,
+                        state.episode_id,
+                        state.scenario_metadata,
+                        float(max(result.observation.rho)) if result.observation.rho else 0.0,
+                        [idx for idx, status in enumerate(result.observation.line_status) if not status],
+                    )
 
-                state = env.state()
-                logger.info(
-                    "Baseline episode finished task_id=%s seed=%s step_count=%s done=%s last_reward=%.4f",
-                    task_id,
-                    seed,
-                    state.step_count,
-                    state.done,
-                    state.last_reward,
-                )
-                response = requests.post(
-                    f"{base_url}/grader",
-                    json={
+                    step_idx = 0
+                    do_nothing_steps = 0
+                    raw_outputs: list[dict[str, Any]] = []
+                    while not result.done and step_idx < task.max_steps:
+                        action, planning_trace = choose_action_with_qwen(
+                            client=client,
+                            env=env,
+                            episode_id=state.episode_id,
+                            task_id=task_id,
+                            observation=result.observation,
+                            step_count=step_idx,
+                            max_steps=task.max_steps,
+                            include_task_description=(step_idx == 0),
+                            llm_config=llm_config,
+                        )
+                        raw_outputs.append(
+                            {
+                                "step": step_idx + 1,
+                                "proposal_prompt": planning_trace["proposal_prompt"],
+                                "proposal_raw_output": planning_trace["proposal_raw_output"],
+                                "proposal_trace": planning_trace["proposal_trace"],
+                                "graph_intelligence": planning_trace["graph_intelligence"],
+                                "simulations": planning_trace["simulations"],
+                                "final_prompt": planning_trace["final_prompt"],
+                                "final_raw_output": planning_trace["final_raw_output"],
+                                "final_trace": planning_trace["final_trace"],
+                                "selected_action": action.model_dump(),
+                                "observation_summary": {
+                                    "max_rho": max(result.observation.rho) if result.observation.rho else 0.0,
+                                    "disconnected_lines": [
+                                        idx
+                                        for idx, status in enumerate(result.observation.line_status)
+                                        if not status
+                                    ],
+                                    "timestep_overflow": result.observation.timestep_overflow,
+                                },
+                            }
+                        )
+                        if action.do_nothing:
+                            do_nothing_steps += 1
+                        logger.info(
+                            "Baseline action task_id=%s seed=%s step=%s action=%s trace=%s",
+                            task_id,
+                            seed,
+                            step_idx + 1,
+                            action.model_dump(),
+                            planning_trace["final_trace"],
+                        )
+                        result = env.step(action)
+                        step_idx += 1
+
+                    state = env.state()
+                    logger.info(
+                        "Baseline episode finished task_id=%s seed=%s step_count=%s done=%s last_reward=%.4f",
+                        task_id,
+                        seed,
+                        state.step_count,
+                        state.done,
+                        state.last_reward,
+                    )
+                    response = requests.post(
+                        f"{base_url}/grader",
+                        json={
+                            "task_id": task_id,
+                            "episode_log": [entry.model_dump() for entry in state.episode_log],
+                        },
+                        timeout=60,
+                    )
+                    response.raise_for_status()
+                    score_payload = response.json()
+                    episode_score = float(score_payload["score"])
+                    episode_length = int(state.step_count)
+                    record = {
                         "task_id": task_id,
+                        "seed": seed,
+                        "curriculum_episode": curriculum_episode,
+                        "benchmark_tier": benchmark_tier,
+                        "score": episode_score,
+                        "episode_length": episode_length,
+                        "done": state.done,
+                        "do_nothing_steps": do_nothing_steps,
+                        "non_do_nothing_steps": max(0, episode_length - do_nothing_steps),
                         "episode_log": [entry.model_dump() for entry in state.episode_log],
-                    },
-                    timeout=60,
-                )
-                response.raise_for_status()
-                score_payload = response.json()
-                episode_score = float(score_payload["score"])
-                episode_length = int(state.step_count)
-                record = {
-                    "task_id": task_id,
-                    "seed": seed,
-                    "curriculum_episode": curriculum_episode,
-                    "score": episode_score,
-                    "episode_length": episode_length,
-                    "done": state.done,
-                    "do_nothing_steps": do_nothing_steps,
-                    "non_do_nothing_steps": max(0, episode_length - do_nothing_steps),
-                    "episode_log": [entry.model_dump() for entry in state.episode_log],
-                    "raw_outputs": raw_outputs,
-                    "scenario_metadata": state.scenario_metadata,
-                }
-                evaluation_records.append(record)
-                task_metrics[task_id].append(record)
-                logger.info(
-                    "Baseline score task_id=%s seed=%s score=%.6f episode_length=%s do_nothing_steps=%s",
-                    task_id,
-                    seed,
-                    episode_score,
-                    episode_length,
-                    do_nothing_steps,
-                )
+                        "raw_outputs": raw_outputs,
+                        "scenario_metadata": state.scenario_metadata,
+                    }
+                    evaluation_records.append(record)
+                    task_metrics[task_id].append(record)
+                    logger.info(
+                        "Baseline score task_id=%s seed=%s benchmark_tier=%s score=%.6f episode_length=%s do_nothing_steps=%s",
+                        task_id,
+                        seed,
+                        benchmark_tier,
+                        episode_score,
+                        episode_length,
+                        do_nothing_steps,
+                    )
 
         for task_id, records in task_metrics.items():
             task_scores = [float(record["score"]) for record in records]
@@ -262,6 +275,7 @@ def run_baseline_suite(
         llm_config=llm_config,
         baseline_scores=baseline_scores,
         evaluation_records=evaluation_records,
+        selected_task_ids=selected_task_ids,
     )
     append_evaluation_markdown(
         timestamp=timestamp,
@@ -270,6 +284,7 @@ def run_baseline_suite(
         baseline_scores=baseline_scores,
         evaluation_records=evaluation_records,
         run_paths=run_paths,
+        selected_task_ids=selected_task_ids,
     )
     return baseline_scores
 
@@ -288,6 +303,7 @@ def choose_action_with_qwen(
     planning_context = env.planning_context(episode_id)
     graph_intelligence = planning_context.graph_intelligence
     redispatchable_generators = planning_context.redispatchable_generators
+    redispatch_generators = planning_context.redispatch_generators
     logger.info(
         "Graph intelligence task_id=%s step=%s bridges=%s safe_disconnect=%s central_buses=%s islanded=%s corridor=%s stressed=%s",
         task_id,
@@ -304,6 +320,7 @@ def choose_action_with_qwen(
         observation=observation,
         graph_intelligence=graph_intelligence,
         redispatchable_generators=redispatchable_generators,
+        redispatch_generators=redispatch_generators,
         step_count=step_count,
         max_steps=max_steps,
         include_task_description=include_task_description,
@@ -333,9 +350,11 @@ def choose_action_with_qwen(
     )
     proposal_candidates, proposal_trace = parse_candidate_proposals(
         proposal_raw_output,
+        task_id=task_id,
         n_line=len(observation.line_status),
         n_gen=len(observation.gen_p),
         redispatchable_generators=redispatchable_generators,
+        redispatch_generators=redispatch_generators,
     )
     simulation_response = env.simulate_candidates(
         episode_id,
@@ -404,6 +423,8 @@ def choose_action_with_qwen(
         final_raw_output,
     )
     action, final_trace = select_final_action(
+        task_id=task_id,
+        observation=observation,
         final_raw_output=final_raw_output,
         simulations=simulations,
         n_line=len(observation.line_status),
@@ -426,6 +447,7 @@ def build_proposal_prompt(
     observation: GridObservation,
     graph_intelligence: dict[str, Any],
     redispatchable_generators: Sequence[int],
+    redispatch_generators: Sequence[RedispatchGeneratorContext],
     step_count: int,
     max_steps: int,
     include_task_description: bool,
@@ -433,6 +455,7 @@ def build_proposal_prompt(
     line_count = len(observation.line_status)
     gen_count = len(observation.gen_p)
     stressed_lines = summarize_lines(observation.rho, limit=8, minimum_rho=0.7)
+    sensitivity_guidance = observation.sensitivity_guidance[:3]
     disconnected = [
         {"line_id": idx, "status": "disconnected"}
         for idx, status in enumerate(observation.line_status)
@@ -447,25 +470,37 @@ def build_proposal_prompt(
         'Use this exact schema: {"candidates":[{"action_type":"disconnect_line|reconnect_line|redispatch|do_nothing","line_id":null|int,"gen_id":null|int,"delta_mw":null|float,"reason":"short string"}]}',
         "Rules: no markdown, no prose, no code fences, no extra keys, exactly 3 candidates.",
         "Diversity rule: use at least two different action types when plausible.",
+        "CRITICAL PHYSICS RULE: You must prioritize candidates from the sensitivity_guidance list. These actions have been mathematically verified by power-flow sensitivity factors to reduce the load on the stressed line.",
         f"task_id={task_id}",
         f"step={step_count + 1}/{max_steps}",
         f"max_rho={max(observation.rho):.3f}" if observation.rho else "max_rho=0.0",
         f"line_count={line_count}",
         f"generator_count={gen_count}",
         "redispatchable_generators=" + json.dumps([int(x) for x in redispatchable_generators], separators=(",", ":")),
+        "redispatch_generator_bounds="
+        + json.dumps(
+            [context.model_dump() for context in redispatch_generators],
+            separators=(",", ":"),
+        ),
         "stressed_lines=" + json.dumps(stressed_lines, separators=(",", ":")),
+        "sensitivity_guidance=" + json.dumps(sensitivity_guidance, separators=(",", ":")),
         "disconnected_lines=" + json.dumps(disconnected, separators=(",", ":")),
         "generators=" + json.dumps(generator_summary, separators=(",", ":")),
         "timestep_overflow=" + json.dumps(observation.timestep_overflow, separators=(",", ":")),
         "grid_topology_intelligence=" + json.dumps(graph_intelligence, separators=(",", ":")),
     ]
+    if task_id == "single_fault":
+        lines.insert(
+            6,
+            "TASK RULE: For single_fault, do not propose disconnect_line or reconnect_line. Use redispatch and do_nothing only. Solve congestion by shifting generation, not by cutting topology.",
+        )
     if include_task_description:
         lines.append("task_description=" + TASKS[task_id].description)
     lines.append(
-        'example_1={"candidates":[{"action_type":"disconnect_line","line_id":10,"gen_id":null,"delta_mw":null,"reason":"line 10 appears to be the stress bottleneck"},{"action_type":"redispatch","line_id":null,"gen_id":0,"delta_mw":10.0,"reason":"increase a redispatchable generator to alter flows"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"keep a safe fallback"}]}'
+        'example_1={"candidates":[{"action_type":"disconnect_line","line_id":10,"gen_id":null,"delta_mw":null,"reason":"line 10 appears to be the stress bottleneck"},{"action_type":"redispatch","line_id":null,"gen_id":0,"delta_mw":5.0,"reason":"pick one allowed positive delta from redispatch_generator_bounds"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"keep a safe fallback"}]}'
     )
     lines.append(
-        'example_2={"candidates":[{"action_type":"reconnect_line","line_id":0,"gen_id":null,"delta_mw":null,"reason":"restore missing transfer capacity"},{"action_type":"redispatch","line_id":null,"gen_id":1,"delta_mw":-10.0,"reason":"reduce generator 1 output to ease a corridor"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"baseline if both interventions are dangerous"}]}'
+        'example_2={"candidates":[{"action_type":"reconnect_line","line_id":0,"gen_id":null,"delta_mw":null,"reason":"restore missing transfer capacity"},{"action_type":"redispatch","line_id":null,"gen_id":1,"delta_mw":-5.0,"reason":"pick one allowed negative delta from redispatch_generator_bounds"},{"action_type":"do_nothing","line_id":null,"gen_id":null,"delta_mw":null,"reason":"baseline if both interventions are dangerous"}]}'
     )
     return "\n".join(lines)
 
@@ -482,7 +517,7 @@ def build_final_selection_prompt(
         "Select the safest candidate that reduces stress without ending the episode.",
         "You must select one simulated candidate or explicit do_nothing.",
         "Return a single JSON object only.",
-        'Use this exact schema: {"selected_candidate":1|2|3|0,"action":{"action_type":"disconnect_line|reconnect_line|redispatch|do_nothing","line_id":null|int,"gen_id":null|int,"delta_mw":null|float,"reason":"short string"},"reason":"short string"}',
+        'Use this exact schema: {"selected_candidate":1|2|3|0,"reason":"short string"}',
         "Use selected_candidate=0 only if every candidate is unsafe.",
         "Rules: no markdown, no prose, no code fences, no extra keys.",
         f"task_id={task_id}",
@@ -493,6 +528,11 @@ def build_final_selection_prompt(
             separators=(",", ":"),
         ),
     ]
+    if task_id == "single_fault":
+        lines.insert(
+            7,
+            "RULE: If a simulated candidate safely reduces max_rho compared to the current state, you MUST select it over do_nothing, no matter how small the reduction is. Do not choose do_nothing unless every other candidate increases max_rho or causes a failure. Safe, incremental redispatch improvements are the only way to win.",
+        )
     return "\n".join(lines)
 
 
@@ -529,11 +569,23 @@ def parse_json_action(content: str) -> Dict[str, Any]:
         return {"do_nothing": True}
 
 
+def parse_selected_candidate(content: str) -> int | None:
+    match = re.search(r'"selected_candidate"\s*:\s*(-?\d+)', content)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_candidate_proposals(
     content: str,
     n_line: int,
     n_gen: int,
     redispatchable_generators: Sequence[int] | None = None,
+    redispatch_generators: Sequence[RedispatchGeneratorContext] | None = None,
+    task_id: TaskId = "n_minus_1",
 ) -> tuple[list[tuple[GridAction, dict[str, Any]]], dict[str, Any]]:
     payload = parse_json_action(content)
     raw_candidates = payload.get("candidates", [])
@@ -544,9 +596,11 @@ def parse_candidate_proposals(
                 candidates.append(
                     validate_baseline_action(
                         item,
+                        task_id=task_id,
                         n_line=n_line,
                         n_gen=n_gen,
                         redispatchable_generators=redispatchable_generators,
+                        redispatch_generators=redispatch_generators,
                     )
                 )
 
@@ -559,11 +613,28 @@ def parse_candidate_proposals(
         seen.add(key)
         deduped.append((action, trace))
 
-    fallback_pool = [
-        (GridAction(do_nothing=True), {"decision": "do_nothing", "reason": "fallback_baseline"}),
-        (GridAction(redispatch={0: 10.0}), {"decision": "redispatch", "reason": "fallback_generator_0_up"}),
-        (GridAction(redispatch={0: -10.0}), {"decision": "redispatch", "reason": "fallback_generator_0_down"}),
-    ]
+    fallback_pool = [(GridAction(do_nothing=True), {"decision": "do_nothing", "reason": "fallback_baseline"})]
+    if redispatch_generators:
+        for context in redispatch_generators:
+            for delta in context.allowed_deltas:
+                if abs(delta) < 1e-9:
+                    continue
+                fallback_pool.append(
+                    (
+                        GridAction(redispatch={int(context.gen_id): float(delta)}),
+                        {
+                            "decision": "redispatch",
+                            "reason": f"fallback_generator_{int(context.gen_id)}_{float(delta):.4f}",
+                        },
+                    )
+                )
+    else:
+        fallback_pool.extend(
+            [
+                (GridAction(redispatch={0: 10.0}), {"decision": "redispatch", "reason": "fallback_generator_0_up"}),
+                (GridAction(redispatch={0: -10.0}), {"decision": "redispatch", "reason": "fallback_generator_0_down"}),
+            ]
+        )
     for action, trace in fallback_pool:
         if len(deduped) >= 3:
             break
@@ -584,7 +655,10 @@ def select_final_action(
     simulations: Sequence[SimulationOutcome],
     n_line: int,
     n_gen: int,
+    task_id: TaskId = "n_minus_1",
+    observation: GridObservation | None = None,
 ) -> tuple[GridAction, dict[str, Any]]:
+    deterministic_best = choose_best_simulation(task_id, observation, simulations)
     payload = parse_json_action(final_raw_output)
     reason = payload.get("reason", "")
     selected_candidate = payload.get("selected_candidate")
@@ -592,29 +666,13 @@ def select_final_action(
     try:
         selected_candidate = int(selected_candidate)
     except (TypeError, ValueError):
-        selected_candidate = None
+        selected_candidate = parse_selected_candidate(final_raw_output)
 
     if selected_candidate == 0:
         return GridAction(do_nothing=True), {
             "decision": "do_nothing",
             "reason": reason or "model_rejected_all_candidates",
         }
-
-    action_payload = payload.get("action")
-    if isinstance(action_payload, dict):
-        action, trace = validate_baseline_action(
-            action_payload,
-            n_line=n_line,
-            n_gen=n_gen,
-            redispatchable_generators=None,
-        )
-        for outcome in simulations:
-            if actions_equivalent(action, outcome.action):
-                return outcome.action, {
-                    "decision": "simulated_candidate",
-                    "reason": reason or trace.get("reason", ""),
-                    "selected_candidate": outcome.candidate_index,
-                }
 
     if selected_candidate is not None:
         for outcome in simulations:
@@ -625,30 +683,65 @@ def select_final_action(
                     "selected_candidate": selected_candidate,
                 }
 
-    best = choose_best_simulation(simulations)
-    return best.action, {
+    return deterministic_best.action, {
         "decision": "fallback_best_simulation",
         "reason": reason or "invalid_final_selection",
-        "selected_candidate": best.candidate_index,
+        "selected_candidate": deterministic_best.candidate_index,
     }
 
 
-def choose_best_simulation(simulations: Sequence[SimulationOutcome]) -> SimulationOutcome:
+def choose_best_simulation(
+    task_id: TaskId,
+    observation: GridObservation | None,
+    simulations: Sequence[SimulationOutcome],
+) -> SimulationOutcome:
     safe = [
         outcome
         for outcome in simulations
         if not outcome.done and not outcome.convergence_failed
     ]
     if safe:
+        current_max_rho = max(observation.rho) if observation and observation.rho else None
+        if task_id == "single_fault":
+            improving = [
+                outcome
+                for outcome in safe
+                if current_max_rho is not None
+                and outcome.max_rho < current_max_rho - 1e-9
+                and not outcome.action.do_nothing
+            ]
+            if improving:
+                return min(
+                    improving,
+                    key=lambda outcome: (
+                        outcome.max_rho,
+                        outcome.action.do_nothing,
+                        len(outcome.overloaded_line_ids),
+                        len(outcome.action.line_set),
+                        outcome.candidate_index,
+                    ),
+                )
         return min(
             safe,
-            key=lambda outcome: (outcome.max_rho, len(outcome.overloaded_line_ids), outcome.candidate_index),
+            key=lambda outcome: (
+                outcome.max_rho,
+                outcome.action.do_nothing,
+                len(outcome.overloaded_line_ids),
+                len(outcome.action.line_set),
+                outcome.candidate_index,
+            ),
         )
     nonfatal = [outcome for outcome in simulations if not outcome.convergence_failed]
     if nonfatal:
         return min(
             nonfatal,
-            key=lambda outcome: (outcome.done, outcome.max_rho, outcome.candidate_index),
+            key=lambda outcome: (
+                outcome.done,
+                outcome.max_rho,
+                outcome.action.do_nothing,
+                len(outcome.action.line_set),
+                outcome.candidate_index,
+            ),
         )
     return min(simulations, key=lambda outcome: outcome.candidate_index)
 
@@ -675,18 +768,31 @@ def actions_equivalent(lhs: GridAction, rhs: GridAction) -> bool:
 
 def validate_baseline_action(
     payload: Dict[str, Any],
+    task_id: TaskId,
     n_line: int,
     n_gen: int,
     redispatchable_generators: Sequence[int] | None = None,
+    redispatch_generators: Sequence[RedispatchGeneratorContext] | None = None,
 ) -> tuple[GridAction, dict[str, Any]]:
     allowed_redispatch = (
         {int(gen_id) for gen_id in redispatchable_generators}
         if redispatchable_generators is not None
         else set(range(n_gen))
     )
+    redispatch_context_by_id = (
+        {int(context.gen_id): context for context in redispatch_generators}
+        if redispatch_generators is not None
+        else {}
+    )
     action_type = payload.get("action_type")
     if payload.get("do_nothing") or action_type == "do_nothing":
         return GridAction(do_nothing=True), {"decision": "do_nothing", "reason": payload.get("reason", "explicit_do_nothing")}
+
+    if task_id == "single_fault" and action_type in {"disconnect_line", "reconnect_line"}:
+        return GridAction(do_nothing=True), {
+            "decision": "fallback_do_nothing",
+            "reason": f"{action_type}_forbidden_for_single_fault",
+        }
 
     line_set_payload = payload.get("line_set") or {}
     if not isinstance(line_set_payload, dict):
@@ -747,6 +853,10 @@ def validate_baseline_action(
             and gen_id in allowed_redispatch
             and delta is not None
         ):
+            if gen_id in redispatch_context_by_id:
+                delta = constrain_redispatch_delta(delta, redispatch_context_by_id[gen_id])
+                if delta is None:
+                    return GridAction(do_nothing=True), {"decision": "fallback_do_nothing", "reason": "invalid_redispatch"}
             return (
                 GridAction(redispatch={gen_id: delta}, line_set={}),
                 {"decision": "redispatch", "reason": payload.get("reason", "")},
@@ -761,6 +871,10 @@ def validate_baseline_action(
         except (TypeError, ValueError):
             continue
         if 0 <= gen_id < n_gen and gen_id in allowed_redispatch:
+            if gen_id in redispatch_context_by_id:
+                delta = constrain_redispatch_delta(delta, redispatch_context_by_id[gen_id])
+                if delta is None:
+                    continue
             valid_redispatch[gen_id] = delta
 
     if not valid_line_set and not valid_redispatch:
@@ -771,6 +885,25 @@ def validate_baseline_action(
     )
 
 
+def constrain_redispatch_delta(
+    delta: float,
+    context: RedispatchGeneratorContext,
+) -> float | None:
+    if context.allowed_delta_min == 0.0 and context.allowed_delta_max == 0.0:
+        return None
+    clamped = min(max(float(delta), float(context.allowed_delta_min)), float(context.allowed_delta_max))
+    feasible = [
+        float(value)
+        for value in context.allowed_deltas
+        if float(context.allowed_delta_min) <= float(value) <= float(context.allowed_delta_max)
+    ]
+    if feasible:
+        return min(feasible, key=lambda value: (abs(value - clamped), abs(value), value))
+    if abs(clamped) < 1e-9:
+        return None
+    return round(clamped, 4)
+
+
 def write_evaluation_outputs(
     timestamp: str,
     run_paths: dict[str, Path],
@@ -779,12 +912,13 @@ def write_evaluation_outputs(
     llm_config: BaselineConfig,
     baseline_scores: BaselineScores,
     evaluation_records: list[dict[str, Any]],
+    selected_task_ids: Sequence[TaskId],
 ) -> None:
     json_path = run_paths["json"]
     csv_path = run_paths["csv"]
 
     aggregate: dict[str, Any] = {}
-    for task_id in TASKS:
+    for task_id in selected_task_ids:
         records = [record for record in evaluation_records if record["task_id"] == task_id]
         scores = [float(record["score"]) for record in records]
         lengths = [int(record["episode_length"]) for record in records]
@@ -795,6 +929,19 @@ def write_evaluation_outputs(
             "score_std": round(pstdev(scores), 6) if len(scores) > 1 else 0.0,
             "episode_length_mean": round(mean(lengths), 6) if lengths else 0.0,
             "episode_length_std": round(pstdev(lengths), 6) if len(lengths) > 1 else 0.0,
+            "do_nothing_steps_mean": round(mean(do_nothing), 6) if do_nothing else 0.0,
+        }
+    aggregate_by_tier: dict[str, Any] = {}
+    for benchmark_tier in sorted({record["benchmark_tier"] for record in evaluation_records}):
+        records = [record for record in evaluation_records if record["benchmark_tier"] == benchmark_tier]
+        scores = [float(record["score"]) for record in records]
+        lengths = [int(record["episode_length"]) for record in records]
+        do_nothing = [int(record["do_nothing_steps"]) for record in records]
+        aggregate_by_tier[benchmark_tier] = {
+            "num_episodes": len(records),
+            "score_mean": round(mean(scores), 6) if scores else 0.0,
+            "score_std": round(pstdev(scores), 6) if len(scores) > 1 else 0.0,
+            "episode_length_mean": round(mean(lengths), 6) if lengths else 0.0,
             "do_nothing_steps_mean": round(mean(do_nothing), 6) if do_nothing else 0.0,
         }
 
@@ -813,9 +960,11 @@ def write_evaluation_outputs(
             "max_tokens": llm_config.max_tokens,
             "num_seeds": llm_config.num_seeds,
             "seed_start": llm_config.seed_start,
+            "scenario_mode": llm_config.scenario_mode,
         },
         "summary": baseline_scores.model_dump(),
         "aggregate": aggregate,
+        "aggregate_by_tier": aggregate_by_tier,
         "episodes": evaluation_records,
     }
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -827,6 +976,7 @@ def write_evaluation_outputs(
                 "task_id",
                 "seed",
                 "curriculum_episode",
+                "benchmark_tier",
                 "score",
                 "episode_length",
                 "done",
@@ -841,6 +991,7 @@ def write_evaluation_outputs(
                     "task_id": record["task_id"],
                     "seed": record["seed"],
                     "curriculum_episode": record["curriculum_episode"],
+                    "benchmark_tier": record["benchmark_tier"],
                     "score": record["score"],
                     "episode_length": record["episode_length"],
                     "done": record["done"],
@@ -890,6 +1041,7 @@ def append_evaluation_markdown(
     baseline_scores: BaselineScores,
     evaluation_records: list[dict[str, Any]],
     run_paths: dict[str, Path],
+    selected_task_ids: Sequence[TaskId],
 ) -> None:
     eval_md = Path(__file__).resolve().parent.parent / "evaluation.md"
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -900,23 +1052,29 @@ def append_evaluation_markdown(
         f"## Run {timestamp}",
         "",
         f"- Model: `{model}`",
+        f"- Tasks: `{', '.join(selected_task_ids)}`",
         f"- Seeds: `{llm_config.seed_start}` to `{llm_config.seed_start + llm_config.num_seeds - 1}`",
+        f"- Scenario mode: `{llm_config.scenario_mode}`",
         f"- Sampling: `temperature={llm_config.temperature}`, `top_p={llm_config.top_p}`, `top_k={llm_config.top_k}`, `min_p={llm_config.min_p}`, `presence_penalty={llm_config.presence_penalty}`, `repetition_penalty={llm_config.repetition_penalty}`",
         f"- JSON output: [{run_paths['json']}]({run_paths['json']})",
         f"- CSV output: [{run_paths['csv']}]({run_paths['csv']})",
         f"- Log file: [{run_paths['log']}]({run_paths['log']})",
         "",
-        "| Task | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |",
-        "| --- | ---: | ---: | ---: |",
+        "| Task | Tier | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |",
+        "| --- | --- | ---: | ---: | ---: |",
     ]
 
     for task_id, records in grouped.items():
-        scores = [float(record["score"]) for record in records]
-        lengths = [int(record["episode_length"]) for record in records]
-        do_nothing = [int(record["do_nothing_steps"]) for record in records]
-        lines.append(
-            f"| `{task_id}` | `{mean(scores):.6f}` | `{mean(lengths):.2f}` | `{mean(do_nothing):.2f}` |"
-        )
+        tier_groups: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            tier_groups.setdefault(record["benchmark_tier"], []).append(record)
+        for benchmark_tier, tier_records in tier_groups.items():
+            scores = [float(record["score"]) for record in tier_records]
+            lengths = [int(record["episode_length"]) for record in tier_records]
+            do_nothing = [int(record["do_nothing_steps"]) for record in tier_records]
+            lines.append(
+                f"| `{task_id}` | `{benchmark_tier}` | `{mean(scores):.6f}` | `{mean(lengths):.2f}` | `{mean(do_nothing):.2f}` |"
+            )
 
     lines.extend(
         [
@@ -933,6 +1091,16 @@ def append_evaluation_markdown(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--task-id",
+        dest="task_ids",
+        nargs="+",
+        choices=sorted(TASKS.keys()),
+        help="Run only the selected task ids. Defaults to all tasks.",
+    )
+    args = parser.parse_args()
+
     base_url = os.environ.get("GRID2OP_BASE_URL", "http://127.0.0.1:7860")
-    result = run_baseline_suite(base_url=base_url)
+    result = run_baseline_suite(base_url=base_url, task_ids=args.task_ids)
     print(result.model_dump_json(indent=2))

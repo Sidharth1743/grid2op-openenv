@@ -7,9 +7,9 @@ from typing import Any, Dict, List
 from grid2op.Exceptions import Grid2OpException
 
 try:
-    from ..models import GridObservation, TaskId, TaskInfo
+    from ..models import GridObservation, ScenarioMode, TaskId, TaskInfo
 except ImportError:
-    from models import GridObservation, TaskId, TaskInfo
+    from models import GridObservation, ScenarioMode, TaskId, TaskInfo
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,17 @@ CASCADE_LINE_PAIRS: List[tuple[int, int]] = [
     (0, 3),
 ]
 
+BENCHMARK_TIERS: Dict[TaskId, List[str]] = {
+    "single_fault": ["single_fault_easy", "single_fault_moderate", "single_fault_severe"],
+    "n_minus_1": ["n_minus_1_fixed"],
+    "cascade_prevent": [
+        "cascade_prevent_easy",
+        "cascade_prevent_medium",
+        "cascade_prevent_hard",
+        "cascade_prevent_extreme",
+    ],
+}
+
 
 def task_list() -> List[TaskInfo]:
     return [
@@ -77,6 +88,8 @@ def inject_scenario_raw(
     seed: int | None = None,
     max_attempts: int = 3,
     difficulty_level: int | None = None,
+    scenario_mode: ScenarioMode = "curriculum",
+    benchmark_tier: str | None = None,
 ):
     """Initialize the environment according to the selected task and return the raw Grid2Op observation."""
 
@@ -86,6 +99,8 @@ def inject_scenario_raw(
     effective_attempts = max_attempts
     if task_id == "single_fault":
         effective_attempts = max(max_attempts, 8)
+        if scenario_mode == "benchmark":
+            effective_attempts = max(effective_attempts, 48)
 
     for attempt in range(effective_attempts):
         try:
@@ -102,14 +117,24 @@ def inject_scenario_raw(
                     seed=seed,
                     attempt=attempt,
                     difficulty_level=difficulty_level,
+                    scenario_mode=scenario_mode,
+                    benchmark_tier=benchmark_tier,
                 )
             if task_id == "n_minus_1":
-                return _reset_n_minus_1(env, seed=seed, difficulty_level=difficulty_level)
+                return _reset_n_minus_1(
+                    env,
+                    seed=seed,
+                    difficulty_level=difficulty_level,
+                    scenario_mode=scenario_mode,
+                    benchmark_tier=benchmark_tier,
+                )
             return _reset_cascade_prevent(
                 env,
                 seed=seed,
                 attempt=attempt,
                 difficulty_level=difficulty_level,
+                scenario_mode=scenario_mode,
+                benchmark_tier=benchmark_tier,
             )
         except Grid2OpException as exc:
             logger.warning(
@@ -129,6 +154,8 @@ def inject_scenario(
     seed: int | None = None,
     max_attempts: int = 3,
     difficulty_level: int | None = None,
+    scenario_mode: ScenarioMode = "curriculum",
+    benchmark_tier: str | None = None,
 ) -> tuple[GridObservation, Dict[str, Any]]:
     """Initialize the environment according to the selected task."""
 
@@ -138,6 +165,8 @@ def inject_scenario(
         seed=seed,
         max_attempts=max_attempts,
         difficulty_level=difficulty_level,
+        scenario_mode=scenario_mode,
+        benchmark_tier=benchmark_tier,
     )
     return _convert(raw_obs), metadata
 
@@ -210,10 +239,20 @@ def _distance_to_range(value: float, lower: float, upper: float) -> float:
 def _single_fault_profile(difficulty_level: int | None) -> tuple[str, float, float]:
     episode = _curriculum_episode(difficulty_level)
     if episode <= 3:
-        return "mild", 0.85, 0.90
+        return "mild", 0.90, 0.94
     if episode <= 6:
-        return "moderate", 0.90, 0.95
-    return "severe", 0.95, 1.00
+        return "moderate", 0.94, 0.97
+    return "severe", 0.96, 0.99
+
+
+def _single_fault_benchmark_profile(benchmark_tier: str | None) -> tuple[str, float, float]:
+    if benchmark_tier == "single_fault_easy":
+        return "benchmark_easy", 0.82, 0.85
+    if benchmark_tier == "single_fault_moderate":
+        return "benchmark_moderate", 0.86, 0.89
+    if benchmark_tier == "single_fault_severe":
+        return "benchmark_severe", 0.90, 0.93
+    raise ValueError(f"Unsupported single_fault benchmark_tier: {benchmark_tier}")
 
 
 def _cascade_profile(difficulty_level: int | None, seed: int | None) -> tuple[str, list[int], float]:
@@ -229,16 +268,62 @@ def _cascade_profile(difficulty_level: int | None, seed: int | None) -> tuple[st
     return "two_lines_15pct", selected_pair, 1.15
 
 
+def _cascade_benchmark_profile(benchmark_tier: str | None, seed: int | None) -> tuple[str, list[int], float]:
+    pair_index = 0 if seed is None else int(seed) % len(CASCADE_LINE_PAIRS)
+    selected_pair = list(CASCADE_LINE_PAIRS[pair_index])
+    if benchmark_tier == "cascade_prevent_easy":
+        return "benchmark_easy", [selected_pair[0]], 1.05
+    if benchmark_tier == "cascade_prevent_medium":
+        return "benchmark_medium", [selected_pair[0]], 1.10
+    if benchmark_tier == "cascade_prevent_hard":
+        return "benchmark_hard", selected_pair, 1.10
+    if benchmark_tier == "cascade_prevent_extreme":
+        return "benchmark_extreme", selected_pair, 1.15
+    raise ValueError(f"Unsupported cascade_prevent benchmark_tier: {benchmark_tier}")
+
+
+def benchmark_tiers_for_task(task_id: TaskId) -> list[str]:
+    return list(BENCHMARK_TIERS[task_id])
+
+
+def _available_time_series_count(env) -> int:
+    real_data = getattr(env.chronics_handler, "real_data", None)
+    subpaths = getattr(real_data, "subpaths", None)
+    if subpaths is None:
+        return 1
+    return max(1, int(len(subpaths)))
+
+
+def _single_fault_time_series_id(env, seed: int | None, attempt: int, difficulty_level: int | None) -> int:
+    total = _available_time_series_count(env)
+    base = _curriculum_episode(difficulty_level) - 1
+    seed_offset = 0 if seed is None else int(seed) * 131
+    return int((base + seed_offset + attempt * 17) % total)
+
+
 def _reset_single_fault(
     env,
     seed: int | None,
     attempt: int,
     difficulty_level: int | None,
+    scenario_mode: ScenarioMode,
+    benchmark_tier: str | None,
 ):
-    stage, min_rho, max_rho_target = _single_fault_profile(difficulty_level)
-    options = {"time serie id": _curriculum_episode(difficulty_level) - 1 + attempt}
+    minimum_acceptable_fallback_rho = 0.80
+    if scenario_mode == "benchmark":
+        stage, min_rho, max_rho_target = _single_fault_benchmark_profile(benchmark_tier)
+    else:
+        stage, min_rho, max_rho_target = _single_fault_profile(difficulty_level)
+    options = {
+        "time serie id": _single_fault_time_series_id(
+            env=env,
+            seed=seed,
+            attempt=attempt,
+            difficulty_level=difficulty_level,
+        )
+    }
     obs = env.reset(seed=seed, options=options)
-    max_warmup = 48
+    max_warmup = 2000
     warmup_steps = 0
     best_obs = obs
     best_warmup_steps = 0
@@ -274,10 +359,13 @@ def _reset_single_fault(
             return obs, {
                     "curriculum_episode": _curriculum_episode(difficulty_level),
                     "curriculum_stage": stage,
+                    "scenario_mode": scenario_mode,
+                    "benchmark_tier": benchmark_tier,
                     "time_series_id": int(options["time serie id"]),
                     "target_rho_range": [min_rho, max_rho_target],
                     "warmup_steps": warmup_steps,
                     "target_matched": True,
+                    "benchmark_valid": True,
                     "scenario": "high_loading",
                 }
         obs, _, done, _ = env.step(env.action_space())
@@ -297,7 +385,7 @@ def _reset_single_fault(
         if done:
             break
 
-    if best_stable_obs is not None:
+    if best_stable_obs is not None and best_stable_max_rho >= minimum_acceptable_fallback_rho:
         logger.warning(
             "Falling back to closest stable single_fault warmup state stage=%s best_warmup_steps=%s best_max_rho=%.4f target=[%.2f, %.2f]",
             stage,
@@ -315,10 +403,13 @@ def _reset_single_fault(
         return replayed_obs, {
             "curriculum_episode": _curriculum_episode(difficulty_level),
             "curriculum_stage": stage,
+            "scenario_mode": scenario_mode,
+            "benchmark_tier": benchmark_tier,
             "time_series_id": int(options["time serie id"]),
             "target_rho_range": [min_rho, max_rho_target],
             "warmup_steps": best_stable_warmup_steps,
             "target_matched": False,
+            "benchmark_valid": scenario_mode != "benchmark",
             "stable_fallback_used": True,
             "scenario": "high_loading_closest_stable_match",
         }
@@ -340,7 +431,13 @@ def _replay_single_fault_state(env, seed: int | None, options: dict[str, Any], w
     return obs
 
 
-def _reset_n_minus_1(env, seed: int | None, difficulty_level: int | None):
+def _reset_n_minus_1(
+    env,
+    seed: int | None,
+    difficulty_level: int | None,
+    scenario_mode: ScenarioMode,
+    benchmark_tier: str | None,
+):
     obs = env.reset(
         seed=seed,
         options={"init state": {"set_line_status": [(0, -1)]}},
@@ -353,6 +450,9 @@ def _reset_n_minus_1(env, seed: int | None, difficulty_level: int | None):
         "faulted_lines": [0],
         "curriculum_episode": _curriculum_episode(difficulty_level),
         "curriculum_stage": "fixed_n_minus_1",
+        "scenario_mode": scenario_mode,
+        "benchmark_tier": benchmark_tier or "n_minus_1_fixed",
+        "benchmark_valid": True,
     }
 
 
@@ -361,9 +461,15 @@ def _reset_cascade_prevent(
     seed: int | None,
     attempt: int,
     difficulty_level: int | None,
+    scenario_mode: ScenarioMode,
+    benchmark_tier: str | None,
 ):
     base_obs = env.reset(seed=seed)
-    stage, faulted_lines, load_scale = _cascade_profile(difficulty_level, seed)
+    del attempt
+    if scenario_mode == "benchmark":
+        stage, faulted_lines, load_scale = _cascade_benchmark_profile(benchmark_tier, seed)
+    else:
+        stage, faulted_lines, load_scale = _cascade_profile(difficulty_level, seed)
     load_p = [float(v) for v in (base_obs.load_p * load_scale).astype(float).tolist()]
     obs = env.reset(
         seed=seed,
@@ -386,6 +492,9 @@ def _reset_cascade_prevent(
         "load_scale": load_scale,
         "curriculum_episode": _curriculum_episode(difficulty_level),
         "curriculum_stage": stage,
+        "scenario_mode": scenario_mode,
+        "benchmark_tier": benchmark_tier,
+        "benchmark_valid": True,
     }
 
 
@@ -396,6 +505,7 @@ def _convert(obs) -> GridObservation:
         load_p=[float(x) for x in obs.load_p.tolist()],
         line_status=[bool(x) for x in obs.line_status.tolist()],
         timestep_overflow=[int(x) for x in obs.timestep_overflow.tolist()],
+        sensitivity_guidance=[],
         reward=0.0,
         done=False,
     )
