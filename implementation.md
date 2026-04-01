@@ -94,6 +94,8 @@ Implemented:
    - Phase-aware grader: 30% emergency + 50% security + 20% reconnection
    - Two thresholds: EMERGENCY ≥0.92, WARNING 0.80-0.92, SAFE <0.80
    - N-1 security score (bridge line analysis) in prompt
+   - **Grading fix**: Score = survival_ratio × mastery_score (no legacy override)
+   - Latest eval: score=0.952 (honest grading, was 1.0 with override)
 
 ### Layer 1: Grid2Op physics engine
 

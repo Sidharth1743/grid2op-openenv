@@ -82,6 +82,8 @@ Supporting files outside the minimum template remain for quality and verificatio
    - Terminal: +10×(s/m)² quadratic survival, -15 blackout
    - Phase-aware grader: 30% emergency + 50% security + 20% reconnection
    - N-1 security score (bridge lines) in prompt
+   - **Grading now honest**: score = survival_ratio × mastery_score (no override)
+   - Latest eval: 0.952 (was 1.0 with old override)
 
 ## Planner architecture
 

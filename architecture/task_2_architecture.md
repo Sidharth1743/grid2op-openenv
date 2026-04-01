@@ -143,6 +143,9 @@ N-1 STRUCTURAL SECURITY: score=0.941; bridge_lines=[4, 11, 15]
 ```python
 # graders.py:56-80
 def grade_n_minus_1(episode_log, max_steps=20):
+    # Survival gates the score
+    survival_ratio = min(1.0, len(episode_log) / max_steps)
+    
     # Component A: Emergency response (30%)
     emergency_clear_step = next(
         (entry.step for entry in episode_log[:5] if max_rho < 0.92),
@@ -157,8 +160,10 @@ def grade_n_minus_1(episode_log, max_steps=20):
     # Component C: Reconnection (20%)
     reconnection_score = 1.0 if any(0 not in e.disconnected_lines) else 0.0
     
-    score = 0.30 × emergency + 0.50 × security + 0.20 × reconnect
-    return max(score, legacy_survival_score)
+    mastery_score = 0.30 × emergency + 0.50 × security + 0.20 × reconnect
+    
+    # Final: survival × mastery (no legacy override)
+    return survival_ratio × mastery_score
 ```
 
 | Component | Weight | What it measures |
@@ -166,6 +171,8 @@ def grade_n_minus_1(episode_log, max_steps=20):
 | Emergency response | 30% | Cleared within 5 steps? |
 | Sustained security | 50% | Steps 6-20 with rho < 0.90? |
 | Reconnection | 20% | Did agent reconnect line 0? |
+
+**Note**: Previously, a `legacy_survival_score` override would return 1.0 for any full-length episode regardless of mastery. This was removed to ensure honest grading - the score now properly reflects both survival AND quality of operation.
 
 ---
 
@@ -231,16 +238,28 @@ From L2RPN 2023 winning agent: "greedy reconnection module"
 ## 9. Latest Evaluation Results
 
 ```
-20260401_223005:
-  n_minus_1: score_mean=1.0, episode_length=20
-  do_nothing_steps: 10.6/20 (53%)
-  redispatch_mw: 18.5 MW total
+20260401_230222 (after grading fix):
+  n_minus_1: score_mean=0.952, score_std=0.070
+  episode_length: 20 (full survival)
+  do_nothing_steps: 9.4/20 (47%)
+  redispatch_mw: 23.5 MW total
   
+Grading breakdown (seed 0, score 0.94):
+  survival_ratio = 20/20 = 1.0
+  emergency_score = 0.8 (cleared at step 2, not step 1)
+  security_ratio = 1.0 (all 15 phase-2 steps < 0.90)
+  reconnection_score = 1.0 (line 0 at step 1, line 12 at step 14)
+  mastery = 0.30×0.8 + 0.50×1.0 + 0.20×1.0 = 0.94
+  final = 1.0 × 0.94 = 0.94
+
 Behavior observed:
-  - Two successful reconnections (line 0 at step 5, line 12 at step 12)
+  - Two successful reconnections (line 0 at step 1, line 12 at step 14)
   - N-1 security maintained at 1.0 after recovery
   - Agent learns to stay passive when safe
+  - Grading is now honest (survival × mastery, no override)
 ```
+
+**Note**: Before the grading fix, score was 1.0 due to a `legacy_survival_score` override that returned 1.0 for any full-length episode. The fix removed this override so the score properly reflects both survival AND quality of operation.
 
 ---
 

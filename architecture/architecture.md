@@ -175,7 +175,8 @@ Current verified properties:
   - phase-aware grader (emergency 30% + security 50% + reconnection 20%)
   - N-1 security score in prompt (bridge line analysis)
   - two-threshold framing (EMERGENCY/WARNING/SAFE)
-  - latest eval: score=1.0 on all 5 seeds
+  - **Grading fix**: score = survival_ratio × mastery_score (no legacy override)
+  - latest eval: score=0.952 (honest grading, was 1.0 with override)
 
 Current benchmark caveat:
 
