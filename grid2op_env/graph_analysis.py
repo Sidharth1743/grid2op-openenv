@@ -125,6 +125,11 @@ def analyze_grid_topology(
     return {
         "num_buses": int(active_bus_graph.number_of_nodes()),
         "num_connected_lines": len(connected_line_ids),
+        "bridge_line_count": len(bridge_lines),
+        "n1_security_score": round(
+            max(0.0, 1.0 - (len(bridge_lines) / max(1, len(connected_line_ids)))),
+            6,
+        ),
         "bridge_lines": sorted(bridge_lines),
         "safe_to_disconnect": sorted(safe_to_disconnect),
         "n_minus_1_critical_lines": sorted(bridge_lines),

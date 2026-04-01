@@ -56,6 +56,9 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
     SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW: float = 0.01
+    N_MINUS_1_REDISTRIBUTION_COST_WEIGHT: float = 0.05
+    N_MINUS_1_DANGER_THRESHOLD: float = 0.92
+    N_MINUS_1_SAFE_THRESHOLD: float = 0.80
     _instances_by_episode_id: dict[str, "GridEnvironment"] = {}
     _instances_lock = threading.RLock()
 
@@ -183,10 +186,12 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 raw_obs, raw_reward, env_done, info = self._env.step(grid_action)
                 observation = self._convert_observation(
                     raw_obs,
-                    reward=0.0,
-                    done=False,
-                    metadata={"exceptions": [str(exc) for exc in info.get("exception", [])]},
-                )
+                reward=0.0,
+                done=False,
+                metadata={
+                    "exceptions": [str(exc) for exc in info.get("exception", [])],
+                },
+            )
                 convergence_failed = False
             except CONVERGENCE_EXCEPTIONS as exc:
                 previous_observation = self._last_obs
@@ -212,6 +217,11 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             all_lines_below_80 = bool(observation.rho) and all(rho < 0.8 for rho in observation.rho)
             topology_change_count = self._compute_topology_change_count(previous_observation, observation)
             auto_trip_detected = self._detect_auto_trip(previous_observation, observation, sanitized_action)
+            reconnect_successful = self._detect_successful_reconnection(
+                previous_observation,
+                observation,
+                sanitized_action,
+            )
             if self._task_id == "single_fault" and all_lines_below_target:
                 done = True
             else:
@@ -225,6 +235,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 auto_trip_detected=auto_trip_detected,
                 topology_change_count=topology_change_count,
                 action=sanitized_action,
+                reconnect_successful=reconnect_successful,
             )
             observation.reward = shaped_reward
             observation.done = done
@@ -236,6 +247,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                     "raw_reward": float(raw_reward),
                     "redispatch_mw": self._redispatch_magnitude(sanitized_action),
                     "action_penalty": self._action_penalty(sanitized_action),
+                    "reconnect_successful": reconnect_successful,
                 }
             )
 
@@ -248,6 +260,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 convergence_failed=convergence_failed,
                 topology_change_count=topology_change_count,
                 auto_trip_detected=auto_trip_detected,
+                reconnect_successful=reconnect_successful,
             )
             self._state.episode_log.append(log_entry)
             self._state.last_reward = shaped_reward
@@ -490,6 +503,25 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             return obs
 
         sensitivity_guidance = self._build_sensitivity_guidance(obs)
+        graph_intelligence = analyze_grid_topology(
+            obs,
+            line_or_to_subid=self._env.line_or_to_subid.tolist(),
+            line_ex_to_subid=self._env.line_ex_to_subid.tolist(),
+            n_sub=int(self._env.n_sub),
+        )
+        base_metadata = metadata or {}
+        cooldown = getattr(obs, "time_before_cooldown_line", None)
+        if cooldown is not None:
+            base_metadata = {
+                **base_metadata,
+                "time_before_cooldown_line": [int(x) for x in cooldown.tolist()],
+            }
+        base_metadata = {
+            **base_metadata,
+            "n1_security_score": float(graph_intelligence.get("n1_security_score", 0.0)),
+            "bridge_lines": list(graph_intelligence.get("bridge_lines", [])),
+            "bridge_line_count": int(graph_intelligence.get("bridge_line_count", 0)),
+        }
 
         return GridObservation(
             rho=[float(x) for x in obs.rho.tolist()],
@@ -500,7 +532,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             sensitivity_guidance=sensitivity_guidance,
             reward=reward,
             done=done,
-            metadata=metadata or {},
+            metadata=base_metadata,
         )
 
     def _handle_convergence_failure(self, exc: Exception) -> GridObservation:
@@ -532,6 +564,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         auto_trip_detected: bool,
         topology_change_count: int,
         action: GridAction,
+        reconnect_successful: bool,
     ) -> float:
         max_rho = float(max(observation.rho)) if observation.rho else 0.0
         single_fault_target_threshold = self._single_fault_success_threshold()
@@ -553,17 +586,17 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 reward -= 5.0
 
         elif self._task_id == "n_minus_1":
-            reward += 0.1 * safe_line_ratio
-            if self._previous_max_rho is not None:
-                if max_rho < self._previous_max_rho:
-                    reward += 0.05
-                elif max_rho > self._previous_max_rho:
-                    reward -= 0.05
-            reward -= 0.3 * overloaded_count
+            r_survive = 1.0
+            clipped_margins = [max(-1.0, min(1.0, 1.0 - float(rho))) for rho in observation.rho]
+            r_overload = sum(clipped_margins) / len(clipped_margins) if clipped_margins else 0.0
+            r_cost = -self._n_minus_1_redispatch_cost(action)
+            reward += (0.3 * r_survive) + (0.6 * r_overload) + (0.1 * r_cost)
+            if reconnect_successful and self._reconnection_within_margin(previous_observation=self._last_obs, observation=observation):
+                reward += 2.0
             if reached_time_limit and not observation.metadata.get("convergence_failed"):
-                reward += 3.0
+                reward += 10.0 * ((self._state.step_count / max(1, self._max_steps)) ** 2)
             elif done and not reached_time_limit:
-                reward -= 8.0
+                reward -= 15.0
 
         elif self._task_id == "cascade_prevent":
             if not auto_trip_detected:
@@ -593,6 +626,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         convergence_failed: bool,
         topology_change_count: int,
         auto_trip_detected: bool,
+        reconnect_successful: bool,
     ) -> EpisodeStepLog:
         overloaded_ids = [
             idx for idx, rho in enumerate(observation.rho) if float(rho) > 1.0
@@ -612,6 +646,8 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             max_rho=float(max(observation.rho)) if observation.rho else 0.0,
             redispatch_mw=redispatch_mw,
             action_penalty=action_penalty,
+            n1_security_score=float(observation.metadata.get("n1_security_score", 0.0)),
+            reconnect_successful=reconnect_successful,
             overloaded_line_ids=overloaded_ids,
             single_fault_target_threshold=single_fault_target_threshold,
             all_lines_below_target=all(rho < single_fault_target_threshold for rho in observation.rho),
@@ -641,6 +677,26 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             return 0.9
         return 0.8
 
+    def _n_minus_1_redispatch_cost(self, action: GridAction) -> float:
+        if self._task_id != "n_minus_1" or action.do_nothing or not action.redispatch:
+            return 0.0
+        normalized_cost = 0.0
+        for gen_id, delta in action.redispatch.items():
+            max_ramp = max(float(self._env.gen_max_ramp_up[int(gen_id)]), float(self._env.gen_max_ramp_down[int(gen_id)]), 1e-6)
+            normalized_cost += abs(float(delta)) / max_ramp
+        return self.N_MINUS_1_REDISTRIBUTION_COST_WEIGHT * normalized_cost
+
+    def _reconnection_within_margin(
+        self,
+        previous_observation: GridObservation | None,
+        observation: GridObservation,
+    ) -> bool:
+        if previous_observation is None or not previous_observation.rho or not observation.rho:
+            return False
+        previous_max = max(float(rho) for rho in previous_observation.rho)
+        current_max = max(float(rho) for rho in observation.rho)
+        return current_max <= previous_max + 0.1
+
     @staticmethod
     def _redispatch_magnitude(action: GridAction) -> float:
         if action.do_nothing or not action.redispatch:
@@ -651,6 +707,24 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         if self._task_id != "single_fault":
             return 0.0
         return self.SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW * self._redispatch_magnitude(action)
+
+    def _detect_successful_reconnection(
+        self,
+        previous_observation: GridObservation | None,
+        observation: GridObservation,
+        action: GridAction,
+    ) -> bool:
+        if previous_observation is None:
+            return False
+        requested_reconnects = {
+            int(line_id)
+            for line_id, status in action.line_set.items()
+            if int(status) == 1
+        }
+        for idx, (before, after) in enumerate(zip(previous_observation.line_status, observation.line_status)):
+            if not bool(before) and bool(after) and idx in requested_reconnects:
+                return True
+        return False
 
     def _compute_topology_change_count(
         self,

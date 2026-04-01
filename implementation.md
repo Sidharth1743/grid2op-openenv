@@ -71,6 +71,21 @@ Implemented:
 - adapter: [grid2op_env/server/grid_environment.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/grid_environment.py)
 - client: [grid2op_env/client.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/client.py)
 
+### Recent fixes
+
+1. **Benchmark ranges corrected** ([tasks.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/tasks.py) lines 248-255):
+   - `single_fault_easy`: 0.82-0.85 (was mathematically impossible 0.90-0.94)
+   - `single_fault_moderate`: 0.86-0.89 (was 0.94-0.97)
+   - `single_fault_severe`: 0.90-0.93 (was 0.96-0.99)
+
+2. **Redispatch penalty added** ([grid_environment.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/grid_environment.py) line 58):
+   - `SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW = 0.01` per MW to discourage large interventions
+
+3. **Survival-focused grading** ([graders.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/graders.py)):
+   - 70% weight on survival ratio
+   - 0.5 bonus for achieving target
+   - 0.0-0.3 final state bonus based on how close to target
+
 ### Layer 1: Grid2Op physics engine
 
 Required by `PROJECT.md`:

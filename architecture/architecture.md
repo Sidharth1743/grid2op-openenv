@@ -166,6 +166,9 @@ Current verified properties:
 - local replay mirror is no longer used by the active planner
 - `single_fault`, `n_minus_1`, and `cascade_prevent` all run through the same live-session simulation path
 - unit tests pass for the server-side simulation and planning context path
+- benchmark ranges corrected to be mathematically achievable (tasks.py lines 248-255)
+- redispatch penalty implemented (grid_environment.py line 58)
+- survival-focused grading implemented (graders.py)
 
 Current benchmark caveat:
 

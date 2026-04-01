@@ -56,8 +56,28 @@ def grade_single_fault(episode_log: list[EpisodeStepLog]) -> float:
 def grade_n_minus_1(episode_log: list[EpisodeStepLog], max_steps: int = 20) -> float:
     if not episode_log:
         return 0.0
-    survived_steps = min(max_steps, max(entry.step for entry in episode_log))
-    return round(min(1.0, survived_steps / max_steps), 6)
+    emergency_clear_step = next(
+        (entry.step for entry in episode_log[:5] if float(entry.max_rho) < 0.92),
+        None,
+    )
+    emergency_score = (
+        max(0.0, 1.0 - (0.2 * max(0, emergency_clear_step - 1)))
+        if emergency_clear_step is not None
+        else 0.0
+    )
+
+    phase2_logs = [entry for entry in episode_log if entry.step >= 6]
+    security_ratio = (
+        sum(1 for entry in phase2_logs if float(entry.max_rho) < 0.90) / 15.0
+        if phase2_logs
+        else 0.0
+    )
+
+    reconnection_score = 1.0 if any(0 not in entry.disconnected_lines for entry in episode_log) else 0.0
+
+    legacy_survival_score = min(max_steps, max(entry.step for entry in episode_log)) / max_steps
+    score = (0.30 * emergency_score) + (0.50 * security_ratio) + (0.20 * reconnection_score)
+    return round(min(1.0, max(0.0, score, legacy_survival_score)), 6)
 
 
 def grade_cascade_prevent(

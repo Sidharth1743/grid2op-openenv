@@ -63,6 +63,19 @@ Supporting files outside the minimum template remain for quality and verificatio
 - Qwen3.5 baseline using the Chat Completions API
 - Local Docker workflow with dataset pre-download
 
+## Recent fixes
+
+1. **Benchmark ranges corrected** (tasks.py lines 248-255):
+   - `single_fault_easy`: 0.82-0.85 (was mathematically impossible 0.90-0.94)
+   - `single_fault_moderate`: 0.86-0.89 (was 0.94-0.97)
+   - `single_fault_severe`: 0.90-0.93 (was 0.96-0.99)
+
+2. **Redispatch penalty added** (grid_environment.py line 58):
+   - `SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW = 0.01` per MW to discourage large interventions
+
+3. **Survival-focused grading** (graders.py):
+   - 70% weight on survival ratio + bonuses
+
 ## Planner architecture
 
 `inference.py` now uses this flow:

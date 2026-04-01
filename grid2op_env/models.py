@@ -49,6 +49,8 @@ class EpisodeStepLog(BaseModel):
     max_rho: float
     redispatch_mw: float = 0.0
     action_penalty: float = 0.0
+    n1_security_score: float = 0.0
+    reconnect_successful: bool = False
     overloaded_line_ids: List[int] = Field(default_factory=list)
     single_fault_target_threshold: float = 0.8
     all_lines_below_target: bool = False

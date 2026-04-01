@@ -628,3 +628,31 @@ Summary scores:
 }
 ```
 
+## Run 20260401_223005
+
+- Model: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+- Tasks: `n_minus_1`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260401_223005.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260401_223005.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260401_223005.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260401_223005.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260401_223005.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260401_223005.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: |
+| `n_minus_1` | `n_minus_1_fixed` | `1.000000` | `20.00` | `10.60` |
+
+Summary scores:
+```json
+{
+  "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
+  "scores": {
+    "n_minus_1": 1.0
+  },
+  "episode_lengths": {
+    "n_minus_1": 20
+  }
+}
+```
+

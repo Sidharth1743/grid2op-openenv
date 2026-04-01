@@ -477,6 +477,7 @@ def build_proposal_prompt(
         if not status
     ]
     generator_summary = summarize_generators(observation.gen_p, limit=6)
+    cooldown_info = observation.metadata.get("time_before_cooldown_line", [])
     lines = [
         "You are a grid operator proposing actions for a deterministic simulator.",
         "Propose exactly 3 candidate actions to test in the physics sandbox.",
@@ -508,6 +509,36 @@ def build_proposal_prompt(
         lines.insert(
             6,
             "TASK RULE: For single_fault, do not propose disconnect_line or reconnect_line. Use redispatch and do_nothing only. Solve congestion by shifting generation, not by cutting topology.",
+        )
+    if task_id == "n_minus_1":
+        danger_lines = [entry for entry in stressed_lines if float(entry["rho"]) >= 0.92]
+        warning_lines = [entry for entry in stressed_lines if 0.80 <= float(entry["rho"]) < 0.92]
+        cooldown_zero_lines = [
+            int(idx) for idx, value in enumerate(cooldown_info) if int(value) == 0
+        ] if isinstance(cooldown_info, list) else []
+        lines.insert(
+            6,
+            "TASK RULE: In n_minus_1, operate the degraded topology safely for 20 steps. Reconnect the faulted line when cooldown allows and when simulation shows it is safe.",
+        )
+        lines.insert(
+            7,
+            f"N-1 STRUCTURAL SECURITY: score={float(graph_intelligence.get('n1_security_score', 0.0)):.3f}; bridge_lines={json.dumps(graph_intelligence.get('bridge_lines', []), separators=(',', ':'))}",
+        )
+        lines.insert(
+            8,
+            "THRESHOLDS: EMERGENCY if any line rho >= 0.92, WARNING for 0.80 <= rho < 0.92, SAFE if all lines are below 0.80.",
+        )
+        lines.insert(
+            9,
+            "EMERGENCY_LINES=" + json.dumps(danger_lines, separators=(",", ":")),
+        )
+        lines.insert(
+            10,
+            "WARNING_LINES=" + json.dumps(warning_lines, separators=(",", ":")),
+        )
+        lines.insert(
+            11,
+            "RECONNECT_WINDOW_LINES=" + json.dumps(cooldown_zero_lines, separators=(",", ":")),
         )
     if include_task_description:
         lines.append("task_description=" + TASKS[task_id].description)
