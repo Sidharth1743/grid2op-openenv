@@ -55,6 +55,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
     """Core OpenEnv adapter around Grid2Op."""
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
+    SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW: float = 0.01
     _instances_by_episode_id: dict[str, "GridEnvironment"] = {}
     _instances_lock = threading.RLock()
 
@@ -233,6 +234,8 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                     "step_count": self._state.step_count,
                     "max_steps": self._max_steps,
                     "raw_reward": float(raw_reward),
+                    "redispatch_mw": self._redispatch_magnitude(sanitized_action),
+                    "action_penalty": self._action_penalty(sanitized_action),
                 }
             )
 
@@ -545,9 +548,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 reward += 1.0 / max(1, self._state.step_count)
             reward += 0.05 * max(0.0, 1.0 - max_rho)
             reward -= 0.2 * overloaded_count
-            if not action.do_nothing and action.redispatch:
-                redispatch_amount = sum(abs(float(delta)) for delta in action.redispatch.values())
-                reward -= 0.01 * redispatch_amount
+            reward -= self._action_penalty(action)
             if reached_time_limit and not all(rho < single_fault_target_threshold for rho in observation.rho):
                 reward -= 5.0
 
@@ -600,6 +601,8 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             idx for idx, status in enumerate(observation.line_status) if not status
         ]
         single_fault_target_threshold = self._single_fault_success_threshold()
+        redispatch_mw = self._redispatch_magnitude(action)
+        action_penalty = self._action_penalty(action)
         return EpisodeStepLog(
             step=self._state.step_count,
             task_id=self._task_id,
@@ -607,6 +610,8 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             raw_reward=raw_reward,
             done=bool(observation.done),
             max_rho=float(max(observation.rho)) if observation.rho else 0.0,
+            redispatch_mw=redispatch_mw,
+            action_penalty=action_penalty,
             overloaded_line_ids=overloaded_ids,
             single_fault_target_threshold=single_fault_target_threshold,
             all_lines_below_target=all(rho < single_fault_target_threshold for rho in observation.rho),
@@ -635,6 +640,17 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         if benchmark_tier == "single_fault_severe":
             return 0.9
         return 0.8
+
+    @staticmethod
+    def _redispatch_magnitude(action: GridAction) -> float:
+        if action.do_nothing or not action.redispatch:
+            return 0.0
+        return float(sum(abs(float(delta)) for delta in action.redispatch.values()))
+
+    def _action_penalty(self, action: GridAction) -> float:
+        if self._task_id != "single_fault":
+            return 0.0
+        return self.SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW * self._redispatch_magnitude(action)
 
     def _compute_topology_change_count(
         self,

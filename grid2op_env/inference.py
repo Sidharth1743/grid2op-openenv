@@ -229,6 +229,15 @@ def run_baseline_suite(
                     score_payload = response.json()
                     episode_score = float(score_payload["score"])
                     episode_length = int(state.step_count)
+                    episode_log = [entry.model_dump() for entry in state.episode_log]
+                    total_redispatch_mw = round(
+                        sum(float(entry.get("redispatch_mw", 0.0)) for entry in episode_log),
+                        6,
+                    )
+                    total_action_penalty = round(
+                        sum(float(entry.get("action_penalty", 0.0)) for entry in episode_log),
+                        6,
+                    )
                     record = {
                         "task_id": task_id,
                         "seed": seed,
@@ -239,7 +248,13 @@ def run_baseline_suite(
                         "done": state.done,
                         "do_nothing_steps": do_nothing_steps,
                         "non_do_nothing_steps": max(0, episode_length - do_nothing_steps),
-                        "episode_log": [entry.model_dump() for entry in state.episode_log],
+                        "episode_total_redispatch_mw": total_redispatch_mw,
+                        "episode_action_penalty_total": total_action_penalty,
+                        "episode_action_penalty_mean": round(
+                            total_action_penalty / max(1, episode_length),
+                            6,
+                        ),
+                        "episode_log": episode_log,
                         "raw_outputs": raw_outputs,
                         "scenario_metadata": state.scenario_metadata,
                     }
@@ -923,6 +938,8 @@ def write_evaluation_outputs(
         scores = [float(record["score"]) for record in records]
         lengths = [int(record["episode_length"]) for record in records]
         do_nothing = [int(record["do_nothing_steps"]) for record in records]
+        redispatch_mw = [float(record.get("episode_total_redispatch_mw", 0.0)) for record in records]
+        action_penalty = [float(record.get("episode_action_penalty_total", 0.0)) for record in records]
         aggregate[task_id] = {
             "num_episodes": len(records),
             "score_mean": round(mean(scores), 6) if scores else 0.0,
@@ -930,6 +947,8 @@ def write_evaluation_outputs(
             "episode_length_mean": round(mean(lengths), 6) if lengths else 0.0,
             "episode_length_std": round(pstdev(lengths), 6) if len(lengths) > 1 else 0.0,
             "do_nothing_steps_mean": round(mean(do_nothing), 6) if do_nothing else 0.0,
+            "episode_total_redispatch_mw_mean": round(mean(redispatch_mw), 6) if redispatch_mw else 0.0,
+            "episode_action_penalty_total_mean": round(mean(action_penalty), 6) if action_penalty else 0.0,
         }
     aggregate_by_tier: dict[str, Any] = {}
     for benchmark_tier in sorted({record["benchmark_tier"] for record in evaluation_records}):
@@ -937,12 +956,16 @@ def write_evaluation_outputs(
         scores = [float(record["score"]) for record in records]
         lengths = [int(record["episode_length"]) for record in records]
         do_nothing = [int(record["do_nothing_steps"]) for record in records]
+        redispatch_mw = [float(record.get("episode_total_redispatch_mw", 0.0)) for record in records]
+        action_penalty = [float(record.get("episode_action_penalty_total", 0.0)) for record in records]
         aggregate_by_tier[benchmark_tier] = {
             "num_episodes": len(records),
             "score_mean": round(mean(scores), 6) if scores else 0.0,
             "score_std": round(pstdev(scores), 6) if len(scores) > 1 else 0.0,
             "episode_length_mean": round(mean(lengths), 6) if lengths else 0.0,
             "do_nothing_steps_mean": round(mean(do_nothing), 6) if do_nothing else 0.0,
+            "episode_total_redispatch_mw_mean": round(mean(redispatch_mw), 6) if redispatch_mw else 0.0,
+            "episode_action_penalty_total_mean": round(mean(action_penalty), 6) if action_penalty else 0.0,
         }
 
     payload = {
@@ -982,6 +1005,9 @@ def write_evaluation_outputs(
                 "done",
                 "do_nothing_steps",
                 "non_do_nothing_steps",
+                "episode_total_redispatch_mw",
+                "episode_action_penalty_total",
+                "episode_action_penalty_mean",
             ],
         )
         writer.writeheader()
@@ -997,6 +1023,9 @@ def write_evaluation_outputs(
                     "done": record["done"],
                     "do_nothing_steps": record["do_nothing_steps"],
                     "non_do_nothing_steps": record["non_do_nothing_steps"],
+                    "episode_total_redispatch_mw": record.get("episode_total_redispatch_mw", 0.0),
+                    "episode_action_penalty_total": record.get("episode_action_penalty_total", 0.0),
+                    "episode_action_penalty_mean": record.get("episode_action_penalty_mean", 0.0),
                 }
             )
     logger.info("Wrote evaluation outputs json=%s csv=%s", json_path, csv_path)

@@ -598,3 +598,33 @@ Summary scores:
 }
 ```
 
+## Run 20260401_144305
+
+- Model: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+- Tasks: `single_fault`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260401_144305.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260401_144305.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260401_144305.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260401_144305.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260401_144305.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260401_144305.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: |
+| `single_fault` | `single_fault_easy` | `0.820000` | `9.80` | `2.80` |
+| `single_fault` | `single_fault_moderate` | `0.790000` | `10.00` | `2.40` |
+| `single_fault` | `single_fault_severe` | `0.896000` | `6.20` | `2.80` |
+
+Summary scores:
+```json
+{
+  "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
+  "scores": {
+    "single_fault": 0.835333
+  },
+  "episode_lengths": {
+    "single_fault": 9
+  }
+}
+```
+
