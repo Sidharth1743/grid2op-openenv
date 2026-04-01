@@ -82,9 +82,18 @@ Implemented:
    - `SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW = 0.01` per MW to discourage large interventions
 
 3. **Survival-focused grading** ([graders.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/graders.py)):
-   - 70% weight on survival ratio
-   - 0.5 bonus for achieving target
-   - 0.0-0.3 final state bonus based on how close to target
+   - 70% weight on survival ratio + bonuses
+
+4. **Task 2 (n_minus_1) redesign** - Based on RL2Grid paper and L2RPN winning agents:
+   - Three-component reward: `R = 0.3·R_survive + 0.6·R_overload + 0.1·R_cost`
+   - `R_survive`: +1.0 per step (constant survival signal)
+   - `R_overload`: `(1/n) × Σ clip(1-ρ, -1, 1)` (loading margin)
+   - `R_cost`: -0.05 × Σ|ΔMW|/ramp (redispatch cost)
+   - Reconnection bonus: +2.0 when reconnecting faulted line safely
+   - Terminal: +10×(s/m)² quadratic survival, -15 blackout
+   - Phase-aware grader: 30% emergency + 50% security + 20% reconnection
+   - Two thresholds: EMERGENCY ≥0.92, WARNING 0.80-0.92, SAFE <0.80
+   - N-1 security score (bridge line analysis) in prompt
 
 ### Layer 1: Grid2Op physics engine
 
@@ -165,12 +174,13 @@ Required by the current spec:
   - safe margin bonus `0.05 * (1 - rho_max)`
   - overload penalty `-0.2` per overloaded line
   - failure penalty `-5.0` if max steps reached without fixing
-- `n_minus_1`
-  - sustained safety bonus `0.1 * safe_line_ratio`
-  - margin delta `+0.05 / -0.05`
-  - overload penalty `-0.3` per overloaded line
-  - survival bonus `+3.0`
-  - blackout penalty `-8.0`
+- `n_minus_1` (redesigned based on RL2Grid paper)
+  - **Three-component reward**: `R = 0.3·R_survive + 0.6·R_overload + 0.1·R_cost`
+  - `R_survive`: +1.0 per step (constant survival signal)
+  - `R_overload`: `(1/n) × Σ clip(1 - ρ, -1, 1)` for each line
+  - `R_cost`: -0.05 × Σ|ΔMW|/max_ramp (normalized redispatch cost)
+  - Reconnection bonus: +2.0 when reconnecting faulted line safely
+  - Terminal: +10.0 × (steps_survived/max_steps)², -15.0 blackout penalty
 - `cascade_prevent`
   - cascade prevention bonus `+0.2`
   - overflow duration penalty `-0.1 * timestep_overflow`
@@ -186,14 +196,14 @@ Implemented in [grid2op_env/server/grid_environment.py](/home/sidharth/Desktop/O
 Required by `PROJECT.md`:
 
 - `single_fault`: score based on getting all lines below 90%, scaled by speed
-- `n_minus_1`: survival ratio
+- `n_minus_1`: phase-aware three-component (emergency 30% + security 50% + reconnection 20%)
 - `cascade_prevent`: weighted survival, safety, stabilization composite
 - deterministic behavior
 
 Implemented in [grid2op_env/server/graders.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/graders.py):
 
 - `grade_single_fault`
-- `grade_n_minus_1`
+- `grade_n_minus_1` (phase-aware: emergency response + sustained security + reconnection)
 - `grade_cascade_prevent`
 - top-level `grade_episode`
 
@@ -442,3 +452,9 @@ Verified result:
 - `Numba cannot be loaded` is currently only a performance warning from Grid2Op, not a correctness issue.
 - `grid2op_env` is constrained to Python `<3.13` in [grid2op_env/pyproject.toml](/home/sidharth/Desktop/Openenv_modules/grid2op_env/pyproject.toml).
 - the working baseline and environment runtime were verified using Python 3.12.
+
+## Architecture Documentation
+
+- [architecture/task_1_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_1_architecture.md) - Task 1 (single_fault) detailed walkthrough
+- [architecture/task_2_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_2_architecture.md) - Task 2 (n_minus_1) N-1 contingency management
+- [architecture/architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/architecture.md) - Overall system architecture

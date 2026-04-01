@@ -78,8 +78,9 @@ def test_graders_are_deterministic():
             reward=0.0,
             raw_reward=0.0,
             done=False,
-            max_rho=0.95,
+            max_rho=0.75 if idx >= 6 else 0.85,
             all_lines_below_100=True,
+            disconnected_lines=[],
         )
         for idx in range(1, 21)
     ]

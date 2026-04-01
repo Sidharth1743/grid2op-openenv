@@ -75,9 +75,10 @@ def grade_n_minus_1(episode_log: list[EpisodeStepLog], max_steps: int = 20) -> f
 
     reconnection_score = 1.0 if any(0 not in entry.disconnected_lines for entry in episode_log) else 0.0
 
-    legacy_survival_score = min(max_steps, max(entry.step for entry in episode_log)) / max_steps
-    score = (0.30 * emergency_score) + (0.50 * security_ratio) + (0.20 * reconnection_score)
-    return round(min(1.0, max(0.0, score, legacy_survival_score)), 6)
+    survival_ratio = min(max_steps, max(entry.step for entry in episode_log)) / max_steps
+    mastery_score = (0.30 * emergency_score) + (0.50 * security_ratio) + (0.20 * reconnection_score)
+    final_score = mastery_score * survival_ratio
+    return round(min(1.0, max(0.0, final_score)), 6)
 
 
 def grade_cascade_prevent(

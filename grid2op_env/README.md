@@ -76,6 +76,13 @@ Supporting files outside the minimum template remain for quality and verificatio
 3. **Survival-focused grading** (graders.py):
    - 70% weight on survival ratio + bonuses
 
+4. **Task 2 (n_minus_1) redesign** based on RL2Grid paper:
+   - Three-component reward: 0.3×R_survive + 0.6×R_overload + 0.1×R_cost
+   - Reconnection bonus: +2.0 when safely reconnecting faulted line
+   - Terminal: +10×(s/m)² quadratic survival, -15 blackout
+   - Phase-aware grader: 30% emergency + 50% security + 20% reconnection
+   - N-1 security score (bridge lines) in prompt
+
 ## Planner architecture
 
 `inference.py` now uses this flow:
@@ -152,3 +159,9 @@ Latest saved run:
 - `cascade_prevent`: `1.0`
 
 This confirms the server-side simulation path is active. One benchmark caveat remains: the latest `cascade_prevent` score was achieved on the easier early curriculum slice of the 5-seed run, not yet on the hardest late curriculum stages.
+
+## Architecture Documentation
+
+- [architecture/task_1_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_1_architecture.md) - Task 1 detailed walkthrough
+- [architecture/task_2_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_2_architecture.md) - Task 2 N-1 contingency management
+- [architecture/architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/architecture.md) - Overall system architecture

@@ -133,8 +133,8 @@ Implemented in [grid2op_env/server/tasks.py](/home/sidharth/Desktop/Openenv_modu
 
 Tasks:
 
-- `single_fault`
-- `n_minus_1`
+- `single_fault` - See [task_1_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_1_architecture.md) for detailed walkthrough
+- `n_minus_1` - See [task_2_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_2_architecture.md) for N-1 contingency management
 - `cascade_prevent`
 
 Curriculum:
@@ -169,6 +169,13 @@ Current verified properties:
 - benchmark ranges corrected to be mathematically achievable (tasks.py lines 248-255)
 - redispatch penalty implemented (grid_environment.py line 58)
 - survival-focused grading implemented (graders.py)
+- **Task 2 (n_minus_1) fully redesigned** per RL2Grid paper:
+  - three-component reward (0.3×survive + 0.6×overload + 0.1×cost)
+  - reconnection bonus (+2.0) implemented
+  - phase-aware grader (emergency 30% + security 50% + reconnection 20%)
+  - N-1 security score in prompt (bridge line analysis)
+  - two-threshold framing (EMERGENCY/WARNING/SAFE)
+  - latest eval: score=1.0 on all 5 seeds
 
 Current benchmark caveat:
 
