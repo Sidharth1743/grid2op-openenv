@@ -684,3 +684,34 @@ Summary scores:
 }
 ```
 
+## Run 20260402_080302
+
+- Model: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+- Tasks: `cascade_prevent`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_080302.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_080302.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_080302.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_080302.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_080302.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_080302.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: |
+| `cascade_prevent` | `cascade_prevent_easy` | `1.000000` | `30.00` | `11.80` |
+| `cascade_prevent` | `cascade_prevent_medium` | `1.000000` | `30.00` | `13.80` |
+| `cascade_prevent` | `cascade_prevent_hard` | `0.516000` | `13.80` | `8.20` |
+| `cascade_prevent` | `cascade_prevent_extreme` | `0.677333` | `19.20` | `9.80` |
+
+Summary scores:
+```json
+{
+  "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
+  "scores": {
+    "cascade_prevent": 0.798333
+  },
+  "episode_lengths": {
+    "cascade_prevent": 23
+  }
+}
+```
+

@@ -540,6 +540,29 @@ def build_proposal_prompt(
             11,
             "RECONNECT_WINDOW_LINES=" + json.dumps(cooldown_zero_lines, separators=(",", ":")),
         )
+    if task_id == "cascade_prevent":
+        overflow_urgent = [
+            {
+                "line_id": idx,
+                "rho": round(float(observation.rho[idx]), 4),
+                "timestep_overflow": int(value),
+            }
+            for idx, value in enumerate(observation.timestep_overflow)
+            if int(value) > 0
+        ]
+        overflow_urgent.sort(key=lambda item: (item["timestep_overflow"], item["rho"]), reverse=True)
+        lines.insert(
+            6,
+            "TASK RULE: In cascade_prevent, prioritize lines with active overflow countdowns. A line with timestep_overflow=2 is more urgent than a line with high rho but overflow=0.",
+        )
+        lines.insert(
+            7,
+            "CASCADE RULE: Prevent automatic trips first, then improve thermal margin. Triaging imminent countdown expirations is more important than slightly reducing global max_rho.",
+        )
+        lines.insert(
+            8,
+            "OVERFLOW_COUNTDOWNS=" + json.dumps(overflow_urgent[:8], separators=(",", ":")),
+        )
     if include_task_description:
         lines.append("task_description=" + TASKS[task_id].description)
     lines.append(

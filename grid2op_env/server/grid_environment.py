@@ -600,18 +600,22 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
 
         elif self._task_id == "cascade_prevent":
             if not auto_trip_detected:
-                reward += 0.2
-            reward -= 0.1 * sum(int(value) for value in observation.timestep_overflow)
-            if topology_change_count == 0:
-                reward += 0.05
-            if auto_trip_detected:
-                reward -= 2.0
+                reward += 0.3
+            else:
+                reward -= 2.5
+            reward -= 0.05 * sum(int(value) ** 2 for value in observation.timestep_overflow)
+            clipped_margins = [max(-1.0, min(1.0, 1.0 - float(rho))) for rho in observation.rho]
+            thermal_margin = (sum(clipped_margins) / len(clipped_margins)) if clipped_margins else 0.0
+            reward += 0.1 * thermal_margin
             if observation.metadata.get("convergence_failed"):
-                reward -= 10.0
+                reward -= 12.0
             elif done and not reached_time_limit:
-                reward -= 10.0
+                reward -= 12.0
             elif reached_time_limit:
-                reward += 5.0
+                auto_trips = sum(
+                    1 for entry in self._state.episode_log if bool(entry.auto_trip_detected)
+                ) + (1 if auto_trip_detected else 0)
+                reward += 5.0 * max(0.0, 1.0 - (auto_trips / 5.0)) ** 2
 
         reward += invalid_penalty
         return float(reward)

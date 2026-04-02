@@ -86,23 +86,34 @@ def grade_cascade_prevent(
 ) -> float:
     if not episode_log:
         return 0.0
+    containment_ratio = sum(1 for entry in episode_log if not entry.auto_trip_detected) / max_steps
 
-    terminated_early = any(entry.done and entry.step < max_steps for entry in episode_log)
-    convergence_failed = any(entry.convergence_failed for entry in episode_log)
-    survived_full = (
-        1.0
-        if episode_log[-1].step >= max_steps and not terminated_early and not convergence_failed
+    containment_steps = [entry for entry in episode_log if not entry.auto_trip_detected]
+    stability_ratio = (
+        sum(1 for entry in containment_steps if entry.all_lines_below_100) / len(containment_steps)
+        if containment_steps
         else 0.0
     )
-    safety_ratio = sum(1 for entry in episode_log if entry.all_lines_below_100) / max_steps
 
-    stabilize_step = next(
-        (entry.step for entry in episode_log if entry.all_lines_below_100),
+    first_overload_step = next(
+        (entry.step for entry in episode_log if not entry.all_lines_below_100),
         None,
     )
-    stabilization_score = (
-        (max_steps - stabilize_step + 1) / max_steps if stabilize_step is not None else 0.0
-    )
+    if first_overload_step is None:
+        recovery_score = 1.0
+    else:
+        stabilize_step = next(
+            (
+                entry.step
+                for entry in episode_log
+                if entry.step >= first_overload_step and entry.all_lines_below_100
+            ),
+            None,
+        )
+        if stabilize_step is None:
+            recovery_score = 0.0
+        else:
+            recovery_score = max(0.0, 1.0 - ((stabilize_step - first_overload_step) / 10.0))
 
-    score = (0.5 * survived_full) + (0.3 * safety_ratio) + (0.2 * stabilization_score)
+    score = (0.5 * containment_ratio) + (0.3 * stability_ratio) + (0.2 * recovery_score)
     return round(min(1.0, max(0.0, score)), 6)
