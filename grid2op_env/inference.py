@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, pstdev
+from time import perf_counter
 from typing import Any, Dict, Sequence
 
 import requests
@@ -131,6 +132,7 @@ def run_baseline_suite(
                 for seed in range(llm_config.seed_start, llm_config.seed_start + llm_config.num_seeds):
                     task_episode_counts[task_id] += 1
                     curriculum_episode = task_episode_counts[task_id]
+                    episode_started_at = perf_counter()
                     logger.info(
                         "Baseline episode start task_id=%s seed=%s curriculum_episode=%s benchmark_tier=%s max_steps=%s",
                         task_id,
@@ -230,6 +232,7 @@ def run_baseline_suite(
                     episode_score = float(score_payload["score"])
                     episode_length = int(state.step_count)
                     episode_log = [entry.model_dump() for entry in state.episode_log]
+                    episode_wall_time_s = round(perf_counter() - episode_started_at, 6)
                     total_redispatch_mw = round(
                         sum(float(entry.get("redispatch_mw", 0.0)) for entry in episode_log),
                         6,
@@ -245,6 +248,7 @@ def run_baseline_suite(
                         "benchmark_tier": benchmark_tier,
                         "score": episode_score,
                         "episode_length": episode_length,
+                        "episode_wall_time_s": episode_wall_time_s,
                         "done": state.done,
                         "do_nothing_steps": do_nothing_steps,
                         "non_do_nothing_steps": max(0, episode_length - do_nothing_steps),
@@ -261,12 +265,13 @@ def run_baseline_suite(
                     evaluation_records.append(record)
                     task_metrics[task_id].append(record)
                     logger.info(
-                        "Baseline score task_id=%s seed=%s benchmark_tier=%s score=%.6f episode_length=%s do_nothing_steps=%s",
+                        "Baseline score task_id=%s seed=%s benchmark_tier=%s score=%.6f episode_length=%s episode_wall_time_s=%.6f do_nothing_steps=%s",
                         task_id,
                         seed,
                         benchmark_tier,
                         episode_score,
                         episode_length,
+                        episode_wall_time_s,
                         do_nothing_steps,
                     )
 
@@ -371,6 +376,12 @@ def choose_action_with_qwen(
         redispatchable_generators=redispatchable_generators,
         redispatch_generators=redispatch_generators,
     )
+    proposal_candidates, prefilter_trace = filter_candidate_proposals(
+        task_id=task_id,
+        observation=observation,
+        graph_intelligence=graph_intelligence,
+        proposal_candidates=proposal_candidates,
+    )
     simulation_response = env.simulate_candidates(
         episode_id,
         [action for action, _ in proposal_candidates],
@@ -408,13 +419,30 @@ def choose_action_with_qwen(
             for outcome in simulations
         ],
     )
+    selectable_simulations = filter_selectable_simulations(simulations)
+
+    if not selectable_simulations:
+        return GridAction(do_nothing=True), {
+            "proposal_prompt": proposal_prompt,
+            "proposal_raw_output": proposal_raw_output,
+            "proposal_trace": {**proposal_trace, **prefilter_trace},
+            "graph_intelligence": graph_intelligence,
+            "simulations": [serialize_simulation_outcome(outcome) for outcome in simulations],
+            "final_prompt": "",
+            "final_raw_output": "",
+            "final_trace": {
+                "decision": "do_nothing_all_candidates_failed",
+                "reason": "no selectable candidates survived simulation",
+                "selectable_candidate_count": 0,
+            },
+        }
 
     final_prompt = build_final_selection_prompt(
         task_id=task_id,
         observation=observation,
         step_count=step_count,
         max_steps=max_steps,
-        simulations=simulations,
+        simulations=selectable_simulations,
     )
     final_response = client.chat.completions.create(
         model=llm_config.model,
@@ -448,7 +476,7 @@ def choose_action_with_qwen(
     return action, {
         "proposal_prompt": proposal_prompt,
         "proposal_raw_output": proposal_raw_output,
-        "proposal_trace": proposal_trace,
+        "proposal_trace": {**proposal_trace, **prefilter_trace},
         "graph_intelligence": graph_intelligence,
         "simulations": [serialize_simulation_outcome(outcome) for outcome in simulations],
         "final_prompt": final_prompt,
@@ -471,6 +499,12 @@ def build_proposal_prompt(
     gen_count = len(observation.gen_p)
     stressed_lines = summarize_lines(observation.rho, limit=8, minimum_rho=0.7)
     sensitivity_guidance = observation.sensitivity_guidance[:3]
+    topology_guidance = [
+        item for item in sensitivity_guidance if item.get("action_type") == "disconnect_line"
+    ]
+    redispatch_guidance = [
+        item for item in sensitivity_guidance if item.get("action_type") == "redispatch"
+    ]
     disconnected = [
         {"line_id": idx, "status": "disconnected"}
         for idx, status in enumerate(observation.line_status)
@@ -478,6 +512,12 @@ def build_proposal_prompt(
     ]
     generator_summary = summarize_generators(observation.gen_p, limit=6)
     cooldown_info = observation.metadata.get("time_before_cooldown_line", [])
+    stage_index = int(observation.metadata.get("stage_index", 1))
+    steps_to_stage_boundary = int(observation.metadata.get("steps_to_stage_boundary", 0))
+    available_load_ratio = float(observation.metadata.get("available_load_ratio", 1.0))
+    available_island_ratio = float(observation.metadata.get("available_island_ratio", 1.0))
+    stage_boundary_assessed = bool(observation.metadata.get("stage_boundary_assessed", False))
+    majority_islands_available = bool(observation.metadata.get("majority_islands_available", False))
     lines = [
         "You are a grid operator proposing actions for a deterministic simulator.",
         "Propose exactly 3 candidate actions to test in the physics sandbox.",
@@ -563,6 +603,49 @@ def build_proposal_prompt(
             8,
             "OVERFLOW_COUNTDOWNS=" + json.dumps(overflow_urgent[:8], separators=(",", ":")),
         )
+    if task_id == "multi_stage_cascade":
+        overflow_urgent = [
+            {
+                "line_id": idx,
+                "rho": round(float(observation.rho[idx]), 4),
+                "timestep_overflow": int(value),
+            }
+            for idx, value in enumerate(observation.timestep_overflow)
+            if int(value) > 0
+        ]
+        overflow_urgent.sort(key=lambda item: (item["timestep_overflow"], item["rho"]), reverse=True)
+        lines.insert(
+            6,
+            "TASK RULE: In multi_stage_cascade, assume the collapse will continue across three stages. Do not optimize only for this step; position the grid so later stages keep more load available.",
+        )
+        lines.insert(
+            7,
+            f"STAGE_CONTEXT=stage_{stage_index}_of_3; steps_to_stage_boundary={steps_to_stage_boundary}; available_load_ratio={available_load_ratio:.4f}; available_island_ratio={available_island_ratio:.4f}",
+        )
+        lines.insert(
+            8,
+            f"BOUNDARY_STATUS=assessed:{str(stage_boundary_assessed).lower()}; majority_islands_available:{str(majority_islands_available).lower()}",
+        )
+        lines.insert(
+            9,
+            "MSCF RULE: Prefer actions that preserve transferable generation and keep islands self-sustaining at the next boundary. Avoid short-term fixes that strand load in islands with insufficient generation.",
+        )
+        lines.insert(
+            10,
+            "TASK RULE: With multiple overloaded lines, topology cuts risk bus isolation. Prioritize redispatch over disconnect_line unless the line is explicitly safe_to_disconnect and the action preserves connectivity.",
+        )
+        lines.insert(
+            11,
+            "CONTROLLED_ISLANDING_CANDIDATES=" + json.dumps(topology_guidance, separators=(",", ":")),
+        )
+        lines.insert(
+            12,
+            "REDISPATCH_CANDIDATES=" + json.dumps(redispatch_guidance, separators=(",", ":")),
+        )
+        lines.insert(
+            13,
+            "OVERFLOW_COUNTDOWNS=" + json.dumps(overflow_urgent[:8], separators=(",", ":")),
+        )
     if include_task_description:
         lines.append("task_description=" + TASKS[task_id].description)
     lines.append(
@@ -581,6 +664,7 @@ def build_final_selection_prompt(
     max_steps: int,
     simulations: Sequence[SimulationOutcome],
 ) -> str:
+    task4_hints = build_task4_selection_hints(simulations) if task_id == "multi_stage_cascade" else {}
     lines = [
         "You are a grid operator choosing a final action after reviewing simulator outcomes.",
         "Select the safest candidate that reduces stress without ending the episode.",
@@ -602,7 +686,66 @@ def build_final_selection_prompt(
             7,
             "RULE: If a simulated candidate safely reduces max_rho compared to the current state, you MUST select it over do_nothing, no matter how small the reduction is. Do not choose do_nothing unless every other candidate increases max_rho or causes a failure. Safe, incremental redispatch improvements are the only way to win.",
         )
+    if task_id == "multi_stage_cascade":
+        lines.insert(
+            7,
+            "RULE: Prefer the candidate that preserves future survivability across stage boundaries. A slightly higher short-term max_rho can be acceptable if it keeps more load in islands that still have enough generation.",
+        )
+        lines.insert(
+            8,
+            "RULE: The listed candidates already exclude failed simulations. Choose only from these surviving candidates, or choose 0 only if none are listed.",
+        )
+        lines.insert(
+            9,
+            "RULE: If a safe redispatch candidate strictly improves max_rho over do_nothing, choose that redispatch instead of do_nothing. Do not pick do_nothing when a safe redispatch is better, even by a small margin.",
+        )
+        lines.insert(
+            10,
+            "RULE: A controlled-islanding candidate is justified only if it materially beats the best redispatch on survivability, not merely because it changes topology.",
+        )
+        lines.insert(
+            11,
+            "TASK4_SELECTION_HINTS=" + json.dumps(task4_hints, separators=(",", ":")),
+        )
     return "\n".join(lines)
+
+
+def build_task4_selection_hints(
+    simulations: Sequence[SimulationOutcome],
+) -> dict[str, Any]:
+    best_do_nothing = next(
+        (outcome for outcome in simulations if outcome.action.do_nothing),
+        None,
+    )
+    redispatch = [
+        outcome for outcome in simulations if outcome.action.redispatch and not outcome.action.line_set
+    ]
+    topology = [
+        outcome for outcome in simulations if outcome.action.line_set
+    ]
+    best_redispatch = (
+        min(redispatch, key=lambda outcome: (outcome.max_rho, outcome.candidate_index))
+        if redispatch
+        else None
+    )
+    prefer_redispatch_indices = [
+        outcome.candidate_index
+        for outcome in redispatch
+        if best_do_nothing is not None and outcome.max_rho < best_do_nothing.max_rho - 1e-9
+    ]
+    topology_justified_indices = [
+        outcome.candidate_index
+        for outcome in topology
+        if best_redispatch is None
+        or outcome.max_rho < best_redispatch.max_rho - 0.02
+        or len(outcome.overloaded_line_ids) < len(best_redispatch.overloaded_line_ids)
+    ]
+    return {
+        "best_do_nothing_index": best_do_nothing.candidate_index if best_do_nothing else None,
+        "best_redispatch_index": best_redispatch.candidate_index if best_redispatch else None,
+        "prefer_redispatch_indices": prefer_redispatch_indices,
+        "topology_justified_indices": topology_justified_indices,
+    }
 
 
 def summarize_lines(rho: Sequence[float], limit: int, minimum_rho: float) -> list[dict[str, Any]]:
@@ -719,6 +862,62 @@ def parse_candidate_proposals(
     }
 
 
+def filter_candidate_proposals(
+    task_id: TaskId,
+    observation: GridObservation,
+    graph_intelligence: dict[str, Any],
+    proposal_candidates: Sequence[tuple[GridAction, dict[str, Any]]],
+) -> tuple[list[tuple[GridAction, dict[str, Any]]], dict[str, Any]]:
+    del observation
+    filtered: list[tuple[GridAction, dict[str, Any]]] = []
+    rejected: list[dict[str, Any]] = []
+    safe_disconnect = {int(line_id) for line_id in graph_intelligence.get("safe_to_disconnect", [])}
+
+    for action, trace in proposal_candidates:
+        if task_id == "multi_stage_cascade":
+            rejected_line_ids = [
+                int(line_id)
+                for line_id, status in action.line_set.items()
+                if int(status) == -1 and int(line_id) not in safe_disconnect
+            ]
+            if rejected_line_ids:
+                rejected.append(
+                    {
+                        "action": action.model_dump(),
+                        "reason": f"unsafe_disconnect_filtered:{sorted(rejected_line_ids)}",
+                    }
+                )
+                continue
+        filtered.append((action, trace))
+
+    if not filtered:
+        filtered = [(GridAction(do_nothing=True), {"decision": "do_nothing", "reason": "all_candidates_prefiltered"})]
+
+    deduped: list[tuple[GridAction, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for action, trace in filtered:
+        key = json.dumps(action.model_dump(), sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((action, trace))
+
+    return deduped[:3], {
+        "prefiltered_candidate_count": len(deduped[:3]),
+        "prefilter_rejections": rejected,
+    }
+
+
+def filter_selectable_simulations(
+    simulations: Sequence[SimulationOutcome],
+) -> list[SimulationOutcome]:
+    return [
+        outcome
+        for outcome in simulations
+        if not outcome.convergence_failed and not outcome.done
+    ]
+
+
 def select_final_action(
     final_raw_output: str,
     simulations: Sequence[SimulationOutcome],
@@ -727,7 +926,12 @@ def select_final_action(
     task_id: TaskId = "n_minus_1",
     observation: GridObservation | None = None,
 ) -> tuple[GridAction, dict[str, Any]]:
-    deterministic_best = choose_best_simulation(task_id, observation, simulations)
+    selectable_simulations = filter_selectable_simulations(simulations)
+    deterministic_best = choose_best_simulation(
+        task_id,
+        observation,
+        selectable_simulations or simulations,
+    )
     payload = parse_json_action(final_raw_output)
     reason = payload.get("reason", "")
     selected_candidate = payload.get("selected_candidate")
@@ -744,13 +948,19 @@ def select_final_action(
         }
 
     if selected_candidate is not None:
-        for outcome in simulations:
+        for outcome in selectable_simulations:
             if outcome.candidate_index == selected_candidate:
                 return outcome.action, {
                     "decision": "simulated_candidate_by_index",
                     "reason": reason or outcome.trace.get("reason", ""),
                     "selected_candidate": selected_candidate,
                 }
+
+    if not selectable_simulations:
+        return GridAction(do_nothing=True), {
+            "decision": "do_nothing_no_selectable_candidates",
+            "reason": reason or "all_candidates_failed_simulation",
+        }
 
     return deterministic_best.action, {
         "decision": "fallback_best_simulation",
@@ -991,6 +1201,7 @@ def write_evaluation_outputs(
         records = [record for record in evaluation_records if record["task_id"] == task_id]
         scores = [float(record["score"]) for record in records]
         lengths = [int(record["episode_length"]) for record in records]
+        wall_times = [float(record.get("episode_wall_time_s", 0.0)) for record in records]
         do_nothing = [int(record["do_nothing_steps"]) for record in records]
         redispatch_mw = [float(record.get("episode_total_redispatch_mw", 0.0)) for record in records]
         action_penalty = [float(record.get("episode_action_penalty_total", 0.0)) for record in records]
@@ -1000,6 +1211,8 @@ def write_evaluation_outputs(
             "score_std": round(pstdev(scores), 6) if len(scores) > 1 else 0.0,
             "episode_length_mean": round(mean(lengths), 6) if lengths else 0.0,
             "episode_length_std": round(pstdev(lengths), 6) if len(lengths) > 1 else 0.0,
+            "episode_wall_time_mean_s": round(mean(wall_times), 6) if wall_times else 0.0,
+            "episode_wall_time_std_s": round(pstdev(wall_times), 6) if len(wall_times) > 1 else 0.0,
             "do_nothing_steps_mean": round(mean(do_nothing), 6) if do_nothing else 0.0,
             "episode_total_redispatch_mw_mean": round(mean(redispatch_mw), 6) if redispatch_mw else 0.0,
             "episode_action_penalty_total_mean": round(mean(action_penalty), 6) if action_penalty else 0.0,
@@ -1009,6 +1222,7 @@ def write_evaluation_outputs(
         records = [record for record in evaluation_records if record["benchmark_tier"] == benchmark_tier]
         scores = [float(record["score"]) for record in records]
         lengths = [int(record["episode_length"]) for record in records]
+        wall_times = [float(record.get("episode_wall_time_s", 0.0)) for record in records]
         do_nothing = [int(record["do_nothing_steps"]) for record in records]
         redispatch_mw = [float(record.get("episode_total_redispatch_mw", 0.0)) for record in records]
         action_penalty = [float(record.get("episode_action_penalty_total", 0.0)) for record in records]
@@ -1017,6 +1231,8 @@ def write_evaluation_outputs(
             "score_mean": round(mean(scores), 6) if scores else 0.0,
             "score_std": round(pstdev(scores), 6) if len(scores) > 1 else 0.0,
             "episode_length_mean": round(mean(lengths), 6) if lengths else 0.0,
+            "episode_wall_time_mean_s": round(mean(wall_times), 6) if wall_times else 0.0,
+            "episode_wall_time_std_s": round(pstdev(wall_times), 6) if len(wall_times) > 1 else 0.0,
             "do_nothing_steps_mean": round(mean(do_nothing), 6) if do_nothing else 0.0,
             "episode_total_redispatch_mw_mean": round(mean(redispatch_mw), 6) if redispatch_mw else 0.0,
             "episode_action_penalty_total_mean": round(mean(action_penalty), 6) if action_penalty else 0.0,
@@ -1056,6 +1272,7 @@ def write_evaluation_outputs(
                 "benchmark_tier",
                 "score",
                 "episode_length",
+                "episode_wall_time_s",
                 "done",
                 "do_nothing_steps",
                 "non_do_nothing_steps",
@@ -1074,6 +1291,7 @@ def write_evaluation_outputs(
                     "benchmark_tier": record["benchmark_tier"],
                     "score": record["score"],
                     "episode_length": record["episode_length"],
+                    "episode_wall_time_s": record.get("episode_wall_time_s", 0.0),
                     "done": record["done"],
                     "do_nothing_steps": record["do_nothing_steps"],
                     "non_do_nothing_steps": record["non_do_nothing_steps"],
@@ -1143,8 +1361,8 @@ def append_evaluation_markdown(
         f"- CSV output: [{run_paths['csv']}]({run_paths['csv']})",
         f"- Log file: [{run_paths['log']}]({run_paths['log']})",
         "",
-        "| Task | Tier | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |",
-        "| --- | --- | ---: | ---: | ---: |",
+        "| Task | Tier | Mean Score | Mean Episode Length | Mean Time (s) | Mean Do-Nothing Steps |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
     ]
 
     for task_id, records in grouped.items():
@@ -1154,9 +1372,10 @@ def append_evaluation_markdown(
         for benchmark_tier, tier_records in tier_groups.items():
             scores = [float(record["score"]) for record in tier_records]
             lengths = [int(record["episode_length"]) for record in tier_records]
+            wall_times = [float(record.get("episode_wall_time_s", 0.0)) for record in tier_records]
             do_nothing = [int(record["do_nothing_steps"]) for record in tier_records]
             lines.append(
-                f"| `{task_id}` | `{benchmark_tier}` | `{mean(scores):.6f}` | `{mean(lengths):.2f}` | `{mean(do_nothing):.2f}` |"
+                f"| `{task_id}` | `{benchmark_tier}` | `{mean(scores):.6f}` | `{mean(lengths):.2f}` | `{mean(wall_times):.2f}` | `{mean(do_nothing):.2f}` |"
             )
 
     lines.extend(

@@ -53,7 +53,7 @@ Supporting files outside the minimum template remain for quality and verificatio
 
 - Grid2Op core simulator using `l2rpn_case14_sandbox`
 - Typed `GridAction`, `GridObservation`, and `GridState`
-- Three tasks: `single_fault`, `n_minus_1`, `cascade_prevent`
+- Three tasks: `single_fault`, `n_minus_1`, `cascade_prevent`, `multi_stage_cascade`
 - Reset-time scenario injection and retry logic for non-convergent starts
 - Shaped reward, episode logging, and deterministic graders
 - OpenEnv WebSocket interface plus `/tasks`, `/grader`, and `/baseline`
@@ -84,6 +84,14 @@ Supporting files outside the minimum template remain for quality and verificatio
    - N-1 security score (bridge lines) in prompt
    - **Grading now honest**: score = survival_ratio × mastery_score (no override)
    - Latest eval: 0.952 (was 1.0 with old override)
+
+5. **Task 4 (multi_stage_cascade) added**:
+   - 3 lines disconnected at reset + 15% load increase
+   - Three explicit stages (10 steps each) with stage boundaries at step 10 and 20
+   - Island availability assessment at stage boundaries
+   - Candidate filtering prevents grid collapse actions
+   - Four-component grading: stage completion (30%) + load preservation (40%) + island quality (20%) + speed bonus (10%)
+   - Latest eval: 0.929 (31x improvement from 0.027)
 
 ## Planner architecture
 
@@ -157,13 +165,16 @@ After changing server code, restart the Grid2Op server before running `inference
 Latest saved run:
 
 - `single_fault`: `0.752`
-- `n_minus_1`: `1.0`
-- `cascade_prevent`: `1.0`
+- `n_minus_1`: `0.952`
+- `cascade_prevent`: `0.798`
+- `multi_stage_cascade`: `0.929`
 
-This confirms the server-side simulation path is active. One benchmark caveat remains: the latest `cascade_prevent` score was achieved on the easier early curriculum slice of the 5-seed run, not yet on the hardest late curriculum stages.
+This confirms the server-side simulation path is active.
 
 ## Architecture Documentation
 
 - [architecture/task_1_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_1_architecture.md) - Task 1 detailed walkthrough
 - [architecture/task_2_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_2_architecture.md) - Task 2 N-1 contingency management
+- [architecture/task_3_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_3_architecture.md) - Task 3 cascade prevention
+- [architecture/task_4_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_4_architecture.md) - Task 4 multi-stage cascade management
 - [architecture/architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/architecture.md) - Overall system architecture

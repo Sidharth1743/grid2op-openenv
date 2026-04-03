@@ -147,10 +147,11 @@ Verification:
 
 Required by `PROJECT.md`:
 
-- `single_fault`, `n_minus_1`, `cascade_prevent`
+- `single_fault`, `n_minus_1`, `cascade_prevent`, `multi_stage_cascade`
 - `single_fault` should warm up to a 90-95% style high-loading state
 - `n_minus_1` should reset with one disconnected line
 - `cascade_prevent` should reset with two disconnected lines and 15% load increase
+- `multi_stage_cascade` should reset with three disconnected lines and 15% load increase, with three explicit stages (10 steps each)
 - reset-time convergence retry logic for hard cases
 
 Implemented:
@@ -159,6 +160,7 @@ Implemented:
 - `single_fault`: warmup search until high line loading is found
 - `n_minus_1`: `set_line_status=[(0, -1)]`
 - `cascade_prevent`: two-line fault plus `load_p * 1.15`
+- `multi_stage_cascade`: three-line fault plus `load_p * 1.15`, with overflow_window=2 and do-nothing probe (5 steps)
 - retry loop on `Grid2OpException`
 
 Verification:
@@ -166,6 +168,7 @@ Verification:
 - `single_fault` smoke run succeeded
 - `n_minus_1` smoke run succeeded
 - `cascade_prevent` smoke run succeeded
+- `multi_stage_cascade` smoke run succeeded (3 lines + 15% load)
 
 ### Layer 4: reward function
 
@@ -190,6 +193,12 @@ Required by the current spec:
   - cascade event penalty `-2.0`
   - blackout penalty `-10.0`
   - survival bonus `+5.0`
+- `multi_stage_cascade` (Task 4)
+  - Generation cost penalty: `-0.02 × (total_gen / initial_load)`
+  - Convergence reward: `+0.5 × available_island_ratio` (every step)
+  - Load loss penalty: `-5.0 × (1 - available_load_ratio)` (only at stage boundaries step 10, 20)
+  - Terminal win: `+8.0 × (available_load_ratio)²` (only if >=50% load at step 30)
+  - Terminal blackout: `-12.0` (early termination or convergence failure)
 
 Implemented in [grid2op_env/server/grid_environment.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/grid_environment.py).
 
@@ -200,6 +209,7 @@ Required by `PROJECT.md`:
 - `single_fault`: score based on getting all lines below 90%, scaled by speed
 - `n_minus_1`: phase-aware three-component (emergency 30% + security 50% + reconnection 20%)
 - `cascade_prevent`: weighted survival, safety, stabilization composite
+- `multi_stage_cascade`: stage completion (30%) + load preservation (40%) + island quality (20%) + speed bonus (10%)
 - deterministic behavior
 
 Implemented in [grid2op_env/server/graders.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/graders.py):
@@ -207,6 +217,7 @@ Implemented in [grid2op_env/server/graders.py](/home/sidharth/Desktop/Openenv_mo
 - `grade_single_fault`
 - `grade_n_minus_1` (phase-aware: emergency response + sustained security + reconnection)
 - `grade_cascade_prevent`
+- `grade_multi_stage_cascade` (four-component grading)
 - top-level `grade_episode`
 
 Verification:
@@ -288,13 +299,15 @@ Latest verified runtime output:
   "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
   "scores": {
     "single_fault": 0.752,
-    "n_minus_1": 1.0,
-    "cascade_prevent": 1.0
+    "n_minus_1": 0.952,
+    "cascade_prevent": 0.798,
+    "multi_stage_cascade": 0.929
   },
   "episode_lengths": {
     "single_fault": 3,
     "n_minus_1": 20,
-    "cascade_prevent": 30
+    "cascade_prevent": 30,
+    "multi_stage_cascade": 30
   }
 }
 ```
@@ -459,4 +472,6 @@ Verified result:
 
 - [architecture/task_1_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_1_architecture.md) - Task 1 (single_fault) detailed walkthrough
 - [architecture/task_2_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_2_architecture.md) - Task 2 (n_minus_1) N-1 contingency management
+- [architecture/task_3_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_3_architecture.md) - Task 3 (cascade_prevent) cascade prevention
+- [architecture/task_4_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_4_architecture.md) - Task 4 (multi_stage_cascade) multi-stage cascade management
 - [architecture/architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/architecture.md) - Overall system architecture

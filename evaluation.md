@@ -715,3 +715,129 @@ Summary scores:
 }
 ```
 
+## Run 20260402_091228
+
+- Model: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+- Tasks: `multi_stage_cascade`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_091228.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_091228.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_091228.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_091228.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_091228.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_091228.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: |
+| `multi_stage_cascade` | `multi_stage_cascade_expert` | `0.027334` | `2.80` | `1.60` |
+
+Summary scores:
+```json
+{
+  "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
+  "scores": {
+    "multi_stage_cascade": 0.027334
+  },
+  "episode_lengths": {
+    "multi_stage_cascade": 3
+  }
+}
+```
+
+## Run 20260402_190718
+
+- Model: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+- Tasks: `multi_stage_cascade`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_190718.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_190718.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_190718.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_190718.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_190718.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_190718.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: |
+| `multi_stage_cascade` | `multi_stage_cascade_expert` | `0.842429` | `28.40` | `14.80` |
+
+Summary scores:
+```json
+{
+  "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
+  "scores": {
+    "multi_stage_cascade": 0.842429
+  },
+  "episode_lengths": {
+    "multi_stage_cascade": 28
+  }
+}
+```
+
+## Run 20260402_194905
+
+- Model: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+- Tasks: `multi_stage_cascade`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_194905.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_194905.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_194905.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_194905.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_194905.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_194905.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: |
+| `multi_stage_cascade` | `multi_stage_cascade_expert` | `0.929368` | `30.00` | `7.00` |
+
+Summary scores:
+```json
+{
+  "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
+  "scores": {
+    "multi_stage_cascade": 0.929368
+  },
+  "episode_lengths": {
+    "multi_stage_cascade": 30
+  }
+}
+```
+
+## Run 20260402_202544
+
+- Model: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+- Tasks: `single_fault, n_minus_1, cascade_prevent, multi_stage_cascade`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_202544.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_202544.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_202544.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260402_202544.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_202544.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260402_202544.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Time (s) | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `single_fault` | `single_fault_easy` | `0.820000` | `9.80` | `52.84` | `2.60` |
+| `single_fault` | `single_fault_moderate` | `0.790000` | `10.00` | `48.88` | `2.20` |
+| `single_fault` | `single_fault_severe` | `0.884000` | `5.20` | `25.60` | `2.40` |
+| `n_minus_1` | `n_minus_1_fixed` | `1.000000` | `20.00` | `93.11` | `10.80` |
+| `cascade_prevent` | `cascade_prevent_easy` | `1.000000` | `30.00` | `138.12` | `10.20` |
+| `cascade_prevent` | `cascade_prevent_medium` | `1.000000` | `30.00` | `137.06` | `10.80` |
+| `cascade_prevent` | `cascade_prevent_hard` | `0.677333` | `19.20` | `88.48` | `8.60` |
+| `cascade_prevent` | `cascade_prevent_extreme` | `0.516000` | `13.80` | `63.32` | `4.80` |
+| `multi_stage_cascade` | `multi_stage_cascade_expert` | `0.915644` | `30.00` | `162.95` | `4.60` |
+
+Summary scores:
+```json
+{
+  "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
+  "scores": {
+    "single_fault": 0.831333,
+    "n_minus_1": 1.0,
+    "cascade_prevent": 0.798333,
+    "multi_stage_cascade": 0.915644
+  },
+  "episode_lengths": {
+    "single_fault": 8,
+    "n_minus_1": 20,
+    "cascade_prevent": 23,
+    "multi_stage_cascade": 30
+  }
+}
+```
+

@@ -20,6 +20,8 @@ def grade_episode(task_id: TaskId, episode_log: Iterable[EpisodeStepLog]) -> flo
         return grade_n_minus_1(logs)
     if task_id == "cascade_prevent":
         return grade_cascade_prevent(logs)
+    if task_id == "multi_stage_cascade":
+        return grade_multi_stage_cascade(logs)
     raise ValueError(f"Unsupported task_id: {task_id}")
 
 
@@ -116,4 +118,57 @@ def grade_cascade_prevent(
             recovery_score = max(0.0, 1.0 - ((stabilize_step - first_overload_step) / 10.0))
 
     score = (0.5 * containment_ratio) + (0.3 * stability_ratio) + (0.2 * recovery_score)
+    return round(min(1.0, max(0.0, score)), 6)
+
+
+def grade_multi_stage_cascade(
+    episode_log: list[EpisodeStepLog], max_steps: int = 30
+) -> float:
+    if not episode_log:
+        return 0.0
+
+    reached_stage_2 = any(entry.step >= 10 for entry in episode_log)
+    reached_stage_3 = any(entry.step >= 20 for entry in episode_log)
+    ended_without_blackout = bool(episode_log[-1].step >= max_steps and not episode_log[-1].convergence_failed)
+    stage_completion = (
+        float(reached_stage_2) + float(reached_stage_3) + float(ended_without_blackout)
+    ) / 3.0
+
+    final_entry = episode_log[-1]
+    load_preservation = max(0.0, min(1.0, float(final_entry.available_load_ratio)))
+
+    boundary_logs = [
+        entry for entry in episode_log if entry.stage_boundary_assessed
+    ]
+    island_quality = (
+        sum(1 for entry in boundary_logs if entry.majority_islands_available) / 2.0
+        if boundary_logs
+        else 0.0
+    )
+    island_quality = max(0.0, min(1.0, island_quality))
+
+    stage_ranges = [(1, 10), (11, 20), (21, 30)]
+    stage_speed_scores: list[float] = []
+    for start_step, end_step in stage_ranges:
+        stable_step = next(
+            (
+                entry.step
+                for entry in episode_log
+                if start_step <= entry.step <= end_step and entry.all_lines_below_100
+            ),
+            None,
+        )
+        if stable_step is None:
+            stage_speed_scores.append(0.0)
+            continue
+        steps_to_stable = stable_step - start_step
+        stage_speed_scores.append(max(0.0, (10.0 - steps_to_stable) / 10.0))
+    speed_score = sum(stage_speed_scores) / len(stage_speed_scores)
+
+    score = (
+        0.30 * stage_completion
+        + 0.40 * load_preservation
+        + 0.20 * island_quality
+        + 0.10 * speed_score
+    )
     return round(min(1.0, max(0.0, score)), 6)

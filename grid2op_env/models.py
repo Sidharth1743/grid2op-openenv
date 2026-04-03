@@ -6,7 +6,7 @@ from openenv.core.env_server.types import Action, Observation, State
 from pydantic import BaseModel, Field
 
 
-TaskId = Literal["single_fault", "n_minus_1", "cascade_prevent"]
+TaskId = Literal["single_fault", "n_minus_1", "cascade_prevent", "multi_stage_cascade"]
 ScenarioMode = Literal["curriculum", "benchmark"]
 
 
@@ -51,6 +51,12 @@ class EpisodeStepLog(BaseModel):
     action_penalty: float = 0.0
     n1_security_score: float = 0.0
     reconnect_successful: bool = False
+    stage_index: int = 1
+    steps_to_stage_boundary: int = 0
+    available_load_ratio: float = 1.0
+    available_island_ratio: float = 1.0
+    stage_boundary_assessed: bool = False
+    majority_islands_available: bool = False
     overloaded_line_ids: List[int] = Field(default_factory=list)
     single_fault_target_threshold: float = 0.8
     all_lines_below_target: bool = False

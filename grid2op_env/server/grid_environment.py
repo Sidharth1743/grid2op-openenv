@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 from collections import deque
+from collections import defaultdict
 from uuid import uuid4
 
 from grid2op.Exceptions import BackendError, Grid2OpException
@@ -59,6 +60,10 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
     N_MINUS_1_REDISTRIBUTION_COST_WEIGHT: float = 0.05
     N_MINUS_1_DANGER_THRESHOLD: float = 0.92
     N_MINUS_1_SAFE_THRESHOLD: float = 0.80
+    MULTI_STAGE_GENERATION_COST_SCALE: float = 0.02
+    MULTI_STAGE_LOAD_LOSS_SCALE: float = 5.0
+    MULTI_STAGE_CONVERGENCE_SCALE: float = 0.5
+    MULTI_STAGE_WIN_SCALE: float = 8.0
     _instances_by_episode_id: dict[str, "GridEnvironment"] = {}
     _instances_lock = threading.RLock()
 
@@ -121,14 +126,6 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 scenario_mode=scenario_mode,
                 benchmark_tier=benchmark_tier,
             )
-            observation = self._convert_observation(
-                raw_observation,
-                reward=0.0,
-                done=False,
-                metadata={},
-            )
-            self._last_raw_obs = raw_observation
-            self._last_obs = observation
             self._state = GridState(
                 episode_id=episode_id or str(uuid4()),
                 step_count=0,
@@ -142,6 +139,14 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 episode_log=[],
                 scenario_metadata=scenario_metadata,
             )
+            observation = self._convert_observation(
+                raw_observation,
+                reward=0.0,
+                done=False,
+                metadata={},
+            )
+            self._last_raw_obs = raw_observation
+            self._last_obs = observation
             self._unregister_instance(previous_episode_id)
             self._register_instance(self._state.episode_id)
             logger.info(
@@ -522,6 +527,11 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             "bridge_lines": list(graph_intelligence.get("bridge_lines", [])),
             "bridge_line_count": int(graph_intelligence.get("bridge_line_count", 0)),
         }
+        if self._task_id == "multi_stage_cascade":
+            base_metadata = {
+                **base_metadata,
+                **self._multi_stage_metadata(obs),
+            }
 
         return GridObservation(
             rho=[float(x) for x in obs.rho.tolist()],
@@ -617,6 +627,25 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 ) + (1 if auto_trip_detected else 0)
                 reward += 5.0 * max(0.0, 1.0 - (auto_trips / 5.0)) ** 2
 
+        elif self._task_id == "multi_stage_cascade":
+            initial_total_load = max(
+                float(self._state.scenario_metadata.get("initial_total_load_mw", 0.0)),
+                1e-6,
+            )
+            available_load_ratio = float(observation.metadata.get("available_load_ratio", 0.0))
+            available_island_ratio = float(observation.metadata.get("available_island_ratio", 0.0))
+            total_generation = sum(max(0.0, float(value)) for value in observation.gen_p)
+            reward -= self.MULTI_STAGE_GENERATION_COST_SCALE * (total_generation / initial_total_load)
+            reward += self.MULTI_STAGE_CONVERGENCE_SCALE * available_island_ratio
+            if bool(observation.metadata.get("stage_boundary_assessed")):
+                reward -= self.MULTI_STAGE_LOAD_LOSS_SCALE * max(0.0, 1.0 - available_load_ratio)
+            if observation.metadata.get("convergence_failed"):
+                reward -= 12.0
+            elif done and not reached_time_limit:
+                reward -= 12.0
+            elif reached_time_limit and available_load_ratio >= 0.5:
+                reward += self.MULTI_STAGE_WIN_SCALE * (available_load_ratio ** 2)
+
         reward += invalid_penalty
         return float(reward)
 
@@ -652,6 +681,12 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             action_penalty=action_penalty,
             n1_security_score=float(observation.metadata.get("n1_security_score", 0.0)),
             reconnect_successful=reconnect_successful,
+            stage_index=int(observation.metadata.get("stage_index", 1)),
+            steps_to_stage_boundary=int(observation.metadata.get("steps_to_stage_boundary", 0)),
+            available_load_ratio=float(observation.metadata.get("available_load_ratio", 1.0)),
+            available_island_ratio=float(observation.metadata.get("available_island_ratio", 1.0)),
+            stage_boundary_assessed=bool(observation.metadata.get("stage_boundary_assessed", False)),
+            majority_islands_available=bool(observation.metadata.get("majority_islands_available", False)),
             overloaded_line_ids=overloaded_ids,
             single_fault_target_threshold=single_fault_target_threshold,
             all_lines_below_target=all(rho < single_fault_target_threshold for rho in observation.rho),
@@ -711,6 +746,109 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         if self._task_id != "single_fault":
             return 0.0
         return self.SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW * self._redispatch_magnitude(action)
+
+    def _multi_stage_metadata(self, obs) -> dict[str, float | int | bool]:
+        stage_length = int(self._state.scenario_metadata.get("stage_length", 10))
+        step_count = max(0, int(self._state.step_count))
+        stage_index = min(3, max(1, (step_count // stage_length) + 1))
+        stage_boundary_assessed = step_count in {stage_length, 2 * stage_length}
+        stage_end = min(stage_index * stage_length, int(self._max_steps))
+        steps_to_stage_boundary = max(0, stage_end - step_count)
+        island_metrics = self._assess_island_availability(obs)
+        return {
+            "stage_index": stage_index,
+            "steps_to_stage_boundary": steps_to_stage_boundary,
+            "available_load_ratio": round(float(island_metrics["available_load_ratio"]), 6),
+            "available_island_ratio": round(float(island_metrics["available_island_ratio"]), 6),
+            "stage_boundary_assessed": stage_boundary_assessed,
+            "majority_islands_available": bool(island_metrics["majority_islands_available"]),
+        }
+
+    def _assess_island_availability(self, obs) -> dict[str, float | bool]:
+        initial_total_load = max(
+            float(self._state.scenario_metadata.get("initial_total_load_mw", sum(obs.load_p.tolist()))),
+            1e-6,
+        )
+        components = self._connected_components_from_obs(obs)
+        if not components:
+            return {
+                "available_load_ratio": 0.0,
+                "available_island_ratio": 0.0,
+                "majority_islands_available": False,
+            }
+
+        gens_by_sub: dict[int, list[int]] = defaultdict(list)
+        loads_by_sub: dict[int, list[int]] = defaultdict(list)
+        for gen_id, sub_id in enumerate(self._env.gen_to_subid.tolist()):
+            gens_by_sub[int(sub_id)].append(int(gen_id))
+        for load_id, sub_id in enumerate(self._env.load_to_subid.tolist()):
+            loads_by_sub[int(sub_id)].append(int(load_id))
+
+        available_load_mw = 0.0
+        available_islands = 0
+        evaluated_islands = 0
+        for component in components:
+            component_load = 0.0
+            component_gen_capacity = 0.0
+            for sub_id in component:
+                component_load += sum(float(obs.load_p[load_id]) for load_id in loads_by_sub.get(int(sub_id), []))
+                component_gen_capacity += sum(
+                    float(self._env.gen_pmax[gen_id]) for gen_id in gens_by_sub.get(int(sub_id), [])
+                )
+            if component_load <= 0.0 and component_gen_capacity <= 0.0:
+                continue
+            evaluated_islands += 1
+            if component_gen_capacity + 1e-6 >= component_load:
+                available_islands += 1
+                available_load_mw += component_load
+
+        available_island_ratio = (
+            float(available_islands) / float(evaluated_islands) if evaluated_islands else 0.0
+        )
+        return {
+            "available_load_ratio": available_load_mw / initial_total_load,
+            "available_island_ratio": available_island_ratio,
+            "majority_islands_available": bool(
+                evaluated_islands > 0 and available_islands > (evaluated_islands / 2.0)
+            ),
+        }
+
+    def _connected_components_from_obs(self, obs) -> list[set[int]]:
+        adjacency: dict[int, set[int]] = {sub_id: set() for sub_id in range(int(self._env.n_sub))}
+        line_status = [bool(value) for value in obs.line_status.tolist()]
+        for line_id, connected in enumerate(line_status):
+            if not connected:
+                continue
+            origin = int(self._env.line_or_to_subid[line_id])
+            extremity = int(self._env.line_ex_to_subid[line_id])
+            adjacency[origin].add(extremity)
+            adjacency[extremity].add(origin)
+
+        active_substations = {
+            int(sub_id)
+            for sub_id in range(int(self._env.n_sub))
+            if any(int(load_sub) == int(sub_id) for load_sub in self._env.load_to_subid.tolist())
+            or any(int(gen_sub) == int(sub_id) for gen_sub in self._env.gen_to_subid.tolist())
+            or adjacency[int(sub_id)]
+        }
+        components: list[set[int]] = []
+        visited: set[int] = set()
+        for root in sorted(active_substations):
+            if root in visited:
+                continue
+            stack = [root]
+            component: set[int] = set()
+            while stack:
+                node = stack.pop()
+                if node in visited:
+                    continue
+                visited.add(node)
+                component.add(node)
+                for neighbor in adjacency[node]:
+                    if neighbor not in visited:
+                        stack.append(neighbor)
+            components.append(component)
+        return components
 
     def _detect_successful_reconnection(
         self,
@@ -806,6 +944,14 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             return []
 
         current_global_max_rho = max(rho_values)
+        current_island_metrics = (
+            self._assess_island_availability(obs)
+            if self._task_id == "multi_stage_cascade"
+            else {
+                "available_load_ratio": 0.0,
+                "available_island_ratio": 0.0,
+            }
+        )
         candidates: list[dict[str, float | int | str]] = []
 
         allow_topology_guidance = self._task_id != "single_fault"
@@ -831,13 +977,20 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 global_rho_change = float(max(sim_rho_values) - current_global_max_rho)
                 if global_rho_change >= 0.0:
                     continue
-                candidates.append(
-                    {
-                        "action_type": "disconnect_line",
-                        "target_id": int(line_id),
-                        "expected_rho_change": round(global_rho_change, 6),
-                    }
-                )
+                guidance_item = {
+                    "action_type": "disconnect_line",
+                    "target_id": int(line_id),
+                    "expected_rho_change": round(global_rho_change, 6),
+                }
+                if self._task_id == "multi_stage_cascade":
+                    guidance_item.update(
+                        self._task4_guidance_metrics(
+                            sim_obs=sim_obs,
+                            global_rho_change=global_rho_change,
+                            current_island_metrics=current_island_metrics,
+                        )
+                    )
+                candidates.append(guidance_item)
 
         for gen_id, allowed in enumerate(self._env.gen_redispatchable.tolist()):
             if not bool(allowed):
@@ -864,18 +1017,60 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 global_rho_change = float(max(sim_rho_values) - current_global_max_rho)
                 if global_rho_change >= 0.0:
                     continue
-                candidates.append(
-                    {
-                        "action_type": "redispatch",
-                        "target_id": int(gen_id),
-                        "expected_rho_change": round(global_rho_change, 6),
-                    }
-                )
+                guidance_item = {
+                    "action_type": "redispatch",
+                    "target_id": int(gen_id),
+                    "expected_rho_change": round(global_rho_change, 6),
+                }
+                if self._task_id == "multi_stage_cascade":
+                    guidance_item.update(
+                        self._task4_guidance_metrics(
+                            sim_obs=sim_obs,
+                            global_rho_change=global_rho_change,
+                            current_island_metrics=current_island_metrics,
+                        )
+                    )
+                candidates.append(guidance_item)
+
+        if self._task_id == "multi_stage_cascade":
+            return sorted(
+                candidates,
+                key=lambda item: (
+                    -float(item.get("guidance_priority_score", 0.0)),
+                    float(item["expected_rho_change"]),
+                ),
+            )[:3]
 
         return sorted(
             candidates,
             key=lambda item: float(item["expected_rho_change"]),
         )[:3]
+
+    def _task4_guidance_metrics(
+        self,
+        sim_obs,
+        global_rho_change: float,
+        current_island_metrics: dict[str, float | bool],
+    ) -> dict[str, float]:
+        sim_metrics = self._assess_island_availability(sim_obs)
+        available_load_ratio = float(sim_metrics["available_load_ratio"])
+        available_island_ratio = float(sim_metrics["available_island_ratio"])
+        load_ratio_gain = available_load_ratio - float(current_island_metrics["available_load_ratio"])
+        island_ratio_gain = available_island_ratio - float(current_island_metrics["available_island_ratio"])
+        overloaded_count = sum(1 for value in sim_obs.rho.tolist() if float(value) > 1.0)
+        priority_score = (
+            (-global_rho_change * 2.0)
+            + (available_load_ratio * 1.5)
+            + (available_island_ratio * 0.75)
+            + (load_ratio_gain * 2.0)
+            + (island_ratio_gain * 1.0)
+            - (0.1 * overloaded_count)
+        )
+        return {
+            "guidance_priority_score": round(priority_score, 6),
+            "available_load_ratio": round(available_load_ratio, 6),
+            "available_island_ratio": round(available_island_ratio, 6),
+        }
 
     def _detect_auto_trip(
         self,

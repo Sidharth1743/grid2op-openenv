@@ -135,7 +135,8 @@ Tasks:
 
 - `single_fault` - See [task_1_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_1_architecture.md) for detailed walkthrough
 - `n_minus_1` - See [task_2_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_2_architecture.md) for N-1 contingency management
-- `cascade_prevent`
+- `cascade_prevent` - See [task_3_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_3_architecture.md) for cascade prevention
+- `multi_stage_cascade` - See [task_4_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_4_architecture.md) for multi-stage cascade management
 
 Curriculum:
 
@@ -148,6 +149,12 @@ Curriculum:
   - episodes `4-6`: one line, `+10%`
   - episodes `7-9`: two lines, `+10%`
   - episodes `10+`: two lines, `+15%`
+- `multi_stage_cascade` (Task 4)
+  - 3 lines disconnected at reset
+  - +15% load increase
+  - Three stages: 10 steps each
+  - Overflow window: 2 (faster cascades)
+  - Do-nothing probe: must survive 5 steps
 
 ## Reward and Grading
 
@@ -164,7 +171,7 @@ Current verified properties:
 
 - server-side simulation path is implemented
 - local replay mirror is no longer used by the active planner
-- `single_fault`, `n_minus_1`, and `cascade_prevent` all run through the same live-session simulation path
+- `single_fault`, `n_minus_1`, `cascade_prevent`, and `multi_stage_cascade` all run through the same live-session simulation path
 - unit tests pass for the server-side simulation and planning context path
 - benchmark ranges corrected to be mathematically achievable (tasks.py lines 248-255)
 - redispatch penalty implemented (grid_environment.py line 58)
@@ -177,6 +184,13 @@ Current verified properties:
   - two-threshold framing (EMERGENCY/WARNING/SAFE)
   - **Grading fix**: score = survival_ratio × mastery_score (no legacy override)
   - latest eval: score=0.952 (honest grading, was 1.0 with override)
+- **Task 4 (multi_stage_cascade) added**:
+  - 3 lines disconnected at reset
+  - +15% load increase
+  - Three-stage cascade structure (10 steps each)
+  - Candidate filtering prevents grid collapse actions
+  - Island availability assessment at stage boundaries
+  - Latest eval: score=0.929 (31x improvement from 0.027 with candidate filtering)
 
 Current benchmark caveat:
 

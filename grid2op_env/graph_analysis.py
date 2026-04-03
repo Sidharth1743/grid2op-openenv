@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 from typing import Any, Sequence
 
-import networkx as nx
+import networkx as nx0
 import numpy as np
 
 
@@ -50,7 +50,7 @@ def analyze_grid_topology(
     for line_id in connected_line_ids:
         u = int(line_or_to_subid[line_id])
         v = int(line_ex_to_subid[line_id])
-        key = tuple(sorted((int(u), int(v))))
+        key = tuple(sorted((u, v)))
         pair_to_lines[key].append(line_id)
 
     parallel_groups = {
@@ -125,11 +125,6 @@ def analyze_grid_topology(
     return {
         "num_buses": int(active_bus_graph.number_of_nodes()),
         "num_connected_lines": len(connected_line_ids),
-        "bridge_line_count": len(bridge_lines),
-        "n1_security_score": round(
-            max(0.0, 1.0 - (len(bridge_lines) / max(1, len(connected_line_ids)))),
-            6,
-        ),
         "bridge_lines": sorted(bridge_lines),
         "safe_to_disconnect": sorted(safe_to_disconnect),
         "n_minus_1_critical_lines": sorted(bridge_lines),

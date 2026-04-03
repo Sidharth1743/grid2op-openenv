@@ -8,7 +8,9 @@ from grid2op_env.models import (
     RedispatchGeneratorContext,
 )
 from grid2op_env.inference import (
+    build_final_selection_prompt,
     build_proposal_prompt,
+    filter_candidate_proposals,
     parse_candidate_proposals,
     select_final_action,
     SimulationOutcome,
@@ -18,6 +20,7 @@ from grid2op_env.graph_analysis import analyze_grid_topology
 from grid2op_env.server.tasks import _cascade_profile, benchmark_tiers_for_task, replay_scenario_raw
 from grid2op_env.server.graders import (
     grade_cascade_prevent,
+    grade_multi_stage_cascade,
     grade_n_minus_1,
     grade_single_fault,
 )
@@ -99,6 +102,23 @@ def test_graders_are_deterministic():
         for idx in range(1, 31)
     ]
     assert grade_cascade_prevent(cascade_log) == 1.0
+
+    multi_stage_log = [
+        EpisodeStepLog(
+            step=idx,
+            task_id="multi_stage_cascade",
+            reward=0.0,
+            raw_reward=0.0,
+            done=(idx == 30),
+            max_rho=0.95 if idx in (10, 20, 30) else 0.85,
+            all_lines_below_100=True,
+            stage_boundary_assessed=idx in (10, 20),
+            majority_islands_available=True,
+            available_load_ratio=0.9,
+        )
+        for idx in range(1, 31)
+    ]
+    assert grade_multi_stage_cascade(multi_stage_log) == 0.96
 
 
 def test_candidate_proposals_are_parsed_and_deduped():
@@ -209,6 +229,7 @@ def test_curriculum_metadata_progression():
         _, single_severe = inject_scenario_raw(env, "single_fault", seed=0, difficulty_level=8)
         _, cascade_easy = inject_scenario_raw(env, "cascade_prevent", seed=0, difficulty_level=2)
         _, cascade_hard = inject_scenario_raw(env, "cascade_prevent", seed=0, difficulty_level=10)
+        _, multi_stage = inject_scenario_raw(env, "multi_stage_cascade", seed=0, difficulty_level=1)
 
         assert single_mild["curriculum_stage"] == "mild"
         assert single_severe["curriculum_stage"] == "severe"
@@ -222,6 +243,11 @@ def test_curriculum_metadata_progression():
         assert cascade_hard["curriculum_stage"] == "two_lines_15pct"
         assert cascade_hard["load_scale"] == 1.15
         assert len(cascade_hard["faulted_lines"]) == 2
+        assert multi_stage["curriculum_stage"] == "expert_three_stage"
+        assert multi_stage["load_scale"] == 1.2
+        assert len(multi_stage["faulted_lines"]) == 3
+        assert multi_stage["overflow_window"] == 2
+        assert multi_stage["do_nothing_probe_steps"] == 5
     finally:
         env.close()
 
@@ -250,6 +276,88 @@ def test_cascade_profile_is_deterministic_for_same_seed_and_difficulty():
     first = _cascade_profile(difficulty_level=10, seed=7)
     second = _cascade_profile(difficulty_level=10, seed=7)
     assert first == second
+
+
+def test_multi_stage_prompt_includes_stage_context():
+    prompt = build_proposal_prompt(
+        task_id="multi_stage_cascade",
+        observation=GridObservation(
+            rho=[1.2, 0.95],
+            gen_p=[50.0, 20.0],
+            load_p=[30.0, 20.0],
+            line_status=[True, False],
+            timestep_overflow=[2, 0],
+            sensitivity_guidance=[
+                {"action_type": "disconnect_line", "target_id": 7, "expected_rho_change": -0.1},
+                {"action_type": "redispatch", "target_id": 1, "expected_rho_change": -0.05},
+            ],
+            metadata={
+                "stage_index": 2,
+                "steps_to_stage_boundary": 4,
+                "available_load_ratio": 0.72,
+                "available_island_ratio": 0.5,
+                "stage_boundary_assessed": True,
+                "majority_islands_available": False,
+            },
+        ),
+        graph_intelligence={},
+        redispatchable_generators=[0],
+        redispatch_generators=[],
+        step_count=11,
+        max_steps=30,
+        include_task_description=True,
+    )
+    assert "stage_2_of_3" in prompt
+    assert "available_load_ratio=0.7200" in prompt
+    assert "majority_islands_available:false" in prompt
+    assert "CONTROLLED_ISLANDING_CANDIDATES=" in prompt
+    assert "REDISPATCH_CANDIDATES=" in prompt
+
+
+def test_multi_stage_final_prompt_prefers_redispatch_over_do_nothing_when_better():
+    prompt = build_final_selection_prompt(
+        task_id="multi_stage_cascade",
+        observation=GridObservation(
+            rho=[0.95, 0.85],
+            gen_p=[50.0],
+            load_p=[20.0],
+            line_status=[True, True],
+            timestep_overflow=[0, 0],
+            sensitivity_guidance=[],
+        ),
+        step_count=3,
+        max_steps=30,
+        simulations=[
+            SimulationOutcome(
+                candidate_index=1,
+                action=GridAction(redispatch={0: -5.0}),
+                trace={},
+                done=False,
+                simulated_reward=1.0,
+                max_rho=0.84,
+                overloaded_line_ids=[],
+                disconnected_lines=[],
+                convergence_failed=False,
+                exceptions=[],
+                raw_result={},
+            ),
+            SimulationOutcome(
+                candidate_index=2,
+                action=GridAction(do_nothing=True),
+                trace={},
+                done=False,
+                simulated_reward=0.9,
+                max_rho=0.85,
+                overloaded_line_ids=[],
+                disconnected_lines=[],
+                convergence_failed=False,
+                exceptions=[],
+                raw_result={},
+            ),
+        ],
+    )
+    assert "prefer_redispatch_indices" in prompt
+    assert "choose that redispatch instead of do_nothing" in prompt
 
 
 def test_handle_convergence_failure_without_last_obs_does_not_raise():
@@ -358,6 +466,73 @@ def test_benchmark_tiers_are_declared_for_each_task():
         "cascade_prevent_hard",
         "cascade_prevent_extreme",
     ]
+    assert benchmark_tiers_for_task("multi_stage_cascade") == [
+        "multi_stage_cascade_expert",
+    ]
+
+
+def test_multi_stage_candidate_prefilter_blocks_unsafe_disconnects():
+    candidates = [
+        (GridAction(line_set={14: -1}), {"decision": "disconnect_line"}),
+        (GridAction(redispatch={0: -5.0}), {"decision": "redispatch"}),
+        (GridAction(do_nothing=True), {"decision": "do_nothing"}),
+    ]
+    filtered, trace = filter_candidate_proposals(
+        task_id="multi_stage_cascade",
+        observation=GridObservation(
+            rho=[1.1, 0.9],
+            gen_p=[50.0],
+            load_p=[20.0],
+            line_status=[True, True],
+            timestep_overflow=[0, 0],
+            sensitivity_guidance=[],
+        ),
+        graph_intelligence={"safe_to_disconnect": [3, 4]},
+        proposal_candidates=candidates,
+    )
+    assert len(filtered) == 2
+    assert filtered[0][0].redispatch == {0: -5.0}
+    assert trace["prefilter_rejections"]
+
+
+def test_final_selection_never_returns_failed_candidate():
+    simulations = [
+        SimulationOutcome(
+            candidate_index=1,
+            action=GridAction(line_set={13: -1}),
+            trace={"decision": "disconnect_line", "reason": "bad"},
+            done=True,
+            simulated_reward=-10.0,
+            max_rho=0.0,
+            overloaded_line_ids=[],
+            disconnected_lines=[],
+            convergence_failed=True,
+            exceptions=["boom"],
+            raw_result={},
+        ),
+        SimulationOutcome(
+            candidate_index=2,
+            action=GridAction(redispatch={0: -5.0}),
+            trace={"decision": "redispatch", "reason": "good"},
+            done=False,
+            simulated_reward=1.0,
+            max_rho=1.02,
+            overloaded_line_ids=[13],
+            disconnected_lines=[],
+            convergence_failed=False,
+            exceptions=[],
+            raw_result={},
+        ),
+    ]
+    action, trace = select_final_action(
+        final_raw_output='{"selected_candidate":1,"reason":"pick first"}',
+        simulations=simulations,
+        n_line=20,
+        n_gen=6,
+        task_id="multi_stage_cascade",
+    )
+    assert action.redispatch == {0: -5.0}
+    assert trace["decision"] == "fallback_best_simulation"
 
 
 def test_benchmark_single_fault_requires_target_match():

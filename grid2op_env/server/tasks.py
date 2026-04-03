@@ -50,12 +50,27 @@ TASKS: Dict[TaskId, TaskSpec] = {
         ),
         max_steps=30,
     ),
+    "multi_stage_cascade": TaskSpec(
+        task_id="multi_stage_cascade",
+        difficulty="hard",
+        description=(
+            "Three lines are disconnected and load is increased by 20%. Manage the "
+            "guaranteed three-stage cascade for 30 steps and preserve as much load "
+            "as possible across stage boundaries."
+        ),
+        max_steps=30,
+    ),
 }
 
 CASCADE_LINE_PAIRS: List[tuple[int, int]] = [
     (0, 8),
     (0, 7),
     (0, 3),
+]
+MULTI_STAGE_LINE_TRIPLETS: List[tuple[int, int, int]] = [
+    (2, 4, 14),
+    (2, 4, 15),
+    (4, 14, 16),
 ]
 
 BENCHMARK_TIERS: Dict[TaskId, List[str]] = {
@@ -67,6 +82,7 @@ BENCHMARK_TIERS: Dict[TaskId, List[str]] = {
         "cascade_prevent_hard",
         "cascade_prevent_extreme",
     ],
+    "multi_stage_cascade": ["multi_stage_cascade_expert"],
 }
 
 
@@ -101,6 +117,8 @@ def inject_scenario_raw(
         effective_attempts = max(max_attempts, 8)
         if scenario_mode == "benchmark":
             effective_attempts = max(effective_attempts, 48)
+    if task_id == "multi_stage_cascade":
+        effective_attempts = max(max_attempts, _available_time_series_count(env))
 
     for attempt in range(effective_attempts):
         try:
@@ -124,6 +142,15 @@ def inject_scenario_raw(
                 return _reset_n_minus_1(
                     env,
                     seed=seed,
+                    difficulty_level=difficulty_level,
+                    scenario_mode=scenario_mode,
+                    benchmark_tier=benchmark_tier,
+                )
+            if task_id == "multi_stage_cascade":
+                return _reset_multi_stage_cascade(
+                    env,
+                    seed=seed,
+                    attempt=attempt,
                     difficulty_level=difficulty_level,
                     scenario_mode=scenario_mode,
                     benchmark_tier=benchmark_tier,
@@ -219,6 +246,29 @@ def replay_scenario_raw(
             },
         )
 
+    if task_id == "multi_stage_cascade":
+        faulted_lines = scenario_metadata.get("faulted_lines")
+        load_scale = scenario_metadata.get("load_scale")
+        time_series_id = scenario_metadata.get("time_series_id")
+        if faulted_lines is None or load_scale is None:
+            raise Grid2OpException(
+                "multi_stage_cascade scenario metadata is missing faulted_lines or load_scale; restart the env server with the current code"
+            )
+        _set_overflow_window(env, allowed_steps=2)
+        reset_options = {"time serie id": int(time_series_id)} if time_series_id is not None else None
+        base_obs = env.reset(seed=seed, options=reset_options)
+        load_p = [float(v) for v in (base_obs.load_p * float(load_scale)).astype(float).tolist()]
+        return env.reset(
+            seed=seed,
+            options={
+                **({"time serie id": int(time_series_id)} if time_series_id is not None else {}),
+                "init state": {
+                    "set_line_status": [(int(line_id), -1) for line_id in faulted_lines],
+                    "injection": {"load_p": load_p},
+                }
+            },
+        )
+
     raise ValueError(f"Unsupported task_id for replay: {task_id}")
 
 
@@ -280,6 +330,12 @@ def _cascade_benchmark_profile(benchmark_tier: str | None, seed: int | None) -> 
     if benchmark_tier == "cascade_prevent_extreme":
         return "benchmark_extreme", selected_pair, 1.15
     raise ValueError(f"Unsupported cascade_prevent benchmark_tier: {benchmark_tier}")
+
+
+def _multi_stage_profile(seed: int | None) -> tuple[str, list[int], float]:
+    triplet_index = 0 if seed is None else int(seed) % len(MULTI_STAGE_LINE_TRIPLETS)
+    selected_triplet = list(MULTI_STAGE_LINE_TRIPLETS[triplet_index])
+    return "expert_three_stage", selected_triplet, 1.20
 
 
 def benchmark_tiers_for_task(task_id: TaskId) -> list[str]:
@@ -496,6 +552,85 @@ def _reset_cascade_prevent(
         "benchmark_tier": benchmark_tier,
         "benchmark_valid": True,
     }
+
+
+def _set_overflow_window(env, allowed_steps: int) -> None:
+    from grid2op.Parameters import Parameters
+
+    params = Parameters()
+    params.init_from_dict(env.parameters.to_dict())
+    params.NB_TIMESTEP_OVERFLOW_ALLOWED = int(allowed_steps)
+    env.change_parameters(params)
+
+
+def _reset_multi_stage_cascade(
+    env,
+    seed: int | None,
+    attempt: int,
+    difficulty_level: int | None,
+    scenario_mode: ScenarioMode,
+    benchmark_tier: str | None,
+):
+    del difficulty_level
+    stage, faulted_lines, load_scale = _multi_stage_profile(seed)
+    _set_overflow_window(env, allowed_steps=2)
+    total = _available_time_series_count(env)
+    for offset in range(total):
+        time_series_id = int(((0 if seed is None else int(seed) * 131) + attempt + offset) % total)
+        options = {"time serie id": time_series_id}
+        base_obs = env.reset(seed=seed, options=options)
+        load_p = [float(v) for v in (base_obs.load_p * load_scale).astype(float).tolist()]
+        scenario_options = {
+            "time serie id": time_series_id,
+            "init state": {
+                "set_line_status": [(line_id, -1) for line_id in faulted_lines],
+                "injection": {"load_p": load_p},
+            },
+        }
+        obs = env.reset(seed=seed, options=scenario_options)
+        if _multi_stage_survives_probe(env, min_steps=5):
+            replayed = env.reset(seed=seed, options=scenario_options)
+            logger.info(
+                "Initialized multi_stage_cascade with stage=%s faulted_lines=%s load_scale=%.2f time_series_id=%s max_rho=%.4f overloaded=%s",
+                stage,
+                faulted_lines,
+                load_scale,
+                time_series_id,
+                float(max(replayed.rho)),
+                sum(1 for value in replayed.rho.tolist() if float(value) > 1.0),
+            )
+            return replayed, {
+                "faulted_lines": faulted_lines,
+                "load_scale": load_scale,
+                "time_series_id": time_series_id,
+                "curriculum_episode": 1,
+                "curriculum_stage": stage,
+                "scenario_mode": scenario_mode,
+                "benchmark_tier": benchmark_tier or "multi_stage_cascade_expert",
+                "benchmark_valid": True,
+                "stage_count": 3,
+                "stage_length": 10,
+                "initial_total_load_mw": round(float(sum(load_p)), 6),
+                "overflow_window": 2,
+                "do_nothing_probe_steps": 5,
+            }
+
+    raise Grid2OpException(
+        "Could not find a viable multi_stage_cascade chronic where do_nothing survives 5 steps under the calibrated 3-line +15% load scenario"
+    )
+
+
+def _multi_stage_survives_probe(env, min_steps: int) -> bool:
+    obs = None
+    for _ in range(int(min_steps)):
+        obs, _, done, _ = env.step(env.action_space())
+        if done:
+            return False
+        if obs is None or not obs.rho.tolist():
+            return False
+        if max(float(value) for value in obs.rho.tolist()) <= 0.0:
+            return False
+    return obs is not None
 
 
 def _convert(obs) -> GridObservation:
