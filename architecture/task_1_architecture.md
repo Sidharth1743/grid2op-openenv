@@ -24,10 +24,10 @@ At each step, calculate: max_rho = max(all line loadings)
      ▼
 Find the step where: target_min ≤ max_rho ≤ target_max
      │
-     │  Difficulty levels:
-     │  - easy/curriculum: 0.90-0.94 → 0.82-0.85 (benchmark)
-     │  - moderate: 0.94-0.97 → 0.86-0.89 (benchmark)
-     │  - severe: 0.96-0.99 → 0.90-0.93 (benchmark)
+     │  Difficulty levels (BENCHMARK - FIXED in tasks.py:297-304):
+     │  - easy: 0.82-0.85 (was impossible 0.90-0.94)
+     │  - moderate: 0.86-0.89 (was impossible 0.94-0.97)
+     │  - severe: 0.90-0.93 (was impossible 0.96-0.99)
      │
      ▼
 STOP at that step - this is your starting state
@@ -45,6 +45,7 @@ Return observation + scenario metadata
 - `target_rho_range`: [min, max] that was searched for
 - `warmup_steps`: How many steps were taken to find the state
 - `target_matched`: True if exact target found, False if fallback used
+- `scenario`: "high_loading"
 
 ---
 
@@ -294,12 +295,18 @@ Result:
 
 ### Reward Breakdown (Step 1)
 
+From `grid_environment.py:589-596`:
+
 ```
-Safe margin bonus:  0.05 × (1.0 - 0.82) = 0.05 × 0.18 = 0.009
-Overload penalty:   0 (no lines > 1.0)
-Redispatch penalty: 0.01 × |−10| + 0.01 × |10| = 0.01 × 20 = 0.2
-                                                    ─────────────────
-Total reward:      0.009 - 0.2 = -0.191
+# Actual implementation:
+safe_margin_bonus = 0.05 × max(0.0, 1.0 - max_rho)  # = 0.05 × 0.18 = 0.009
+overload_penalty  = 0.2 × overloaded_count          # = 0 (no lines > 1.0)
+redispatch_penalty = _action_penalty(action)         # = 0.01 × 20 = 0.2
+
+# Plus: early termination bonus if target achieved (step 1)
+# target_achieved_bonus = 1.0 / step_count = 1.0/1 = 1.0
+
+Total reward: 0.009 - 0.2 + 1.0 = 0.809 (if target achieved)
 ```
 
 ---
@@ -445,7 +452,7 @@ if self._task_id == "single_fault" and all_lines_below_target:
 ]
 ```
 
-### Grader Calculation (from graders.py)
+### Grader Calculation (from graders.py:28-55)
 
 ```python
 def grade_single_fault(episode_log):
@@ -454,31 +461,42 @@ def grade_single_fault(episode_log):
     survival_score = survival_ratio * 0.7  # = 0.21
     
     # 2. Target achieved bonus (50%)
-    achieved_target = any(entry.all_lines_below_target for entry in episode_log)
+    achieved_target = any(entry.all_lines_below_target or entry.all_lines_below_80 for entry in episode_log)
     target_bonus = 0.5 if achieved_target else 0.0  # = 0.5
     
-    # 3. Final state bonus
+    # 3. Legacy success score (bonus for early completion)
+    legacy_success_score = 0.0
+    for entry in episode_log:
+        if entry.all_lines_below_target or entry.all_lines_below_80:
+            legacy_success_score = round(max(0.0, 1.0 - (0.08 * max(0, entry.step - 1))), 6)
+            break
+    
+    # 4. Final state bonus (0.3 if below target, 0.15 if within +0.05, 0.05 if within +0.10)
     final_rho = 0.77
     target_threshold = 0.80
     if final_rho < target_threshold:
         final_bonus = 0.3  # = 0.3
     elif final_rho < target_threshold + 0.05:
         final_bonus = 0.15
+    elif final_rho < target_threshold + 0.10:
+        final_bonus = 0.05
     else:
         final_bonus = 0.0
     
     # Total
-    score = survival_score + target_bonus + final_bonus
+    score = (survival_ratio * 0.7) + target_bonus + final_bonus
+    score = max(score, legacy_success_score)  # Take max of both scoring methods
     score = min(1.0, max(0.0, score))
     
-    return score
+    return round(score, 6)
 
-# Calculation:
-# survival_score = 0.3 × 0.7 = 0.21
-# target_bonus = 0.5
-# final_bonus = 0.3
+# For example: episode completes at step 3 with max_rho=0.77:
+# survival_score = (3/10) * 0.7 = 0.21
+# target_bonus = 0.5 (achieved target)
+# legacy_success_score = 1.0 - 0.08 * 2 = 0.84
+# final_bonus = 0.3 (below target)
 # 
-# TOTAL = 0.21 + 0.5 + 0.3 = 1.01 → capped at 1.0
+# score = 0.21 + 0.5 + 0.3 = 1.01 → capped at 1.0
 ```
 
 ---
@@ -561,11 +579,11 @@ STEP 3
 
 | Tier | Target Range | Fixed in Code |
 |------|--------------|---------------|
-| `single_fault_easy` | 0.82-0.85 | tasks.py:250 |
-| `single_fault_moderate` | 0.86-0.89 | tasks.py:252 |
-| `single_fault_severe` | 0.90-0.93 | tasks.py:254 |
+| `single_fault_easy` | 0.82-0.85 | tasks.py:299 |
+| `single_fault_moderate` | 0.86-0.89 | tasks.py:301 |
+| `single_fault_severe` | 0.90-0.93 | tasks.py:303 |
 
-**Note**: The original benchmark ranges (0.90-0.94, etc.) were mathematically impossible because generators could only reduce ~0.03-0.05 rho per step. Fixed in recent updates.
+**Note**: The original benchmark ranges (0.90-0.94, etc.) were mathematically impossible because generators could only reduce ~0.03-0.05 rho per step. Fixed in recent updates to 0.82-0.85, 0.86-0.89, 0.90-0.93.
 
 ---
 

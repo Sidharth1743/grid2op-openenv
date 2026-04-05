@@ -53,7 +53,7 @@ Supporting files outside the minimum template remain for quality and verificatio
 
 - Grid2Op core simulator using `l2rpn_case14_sandbox`
 - Typed `GridAction`, `GridObservation`, and `GridState`
-- Three tasks: `single_fault`, `n_minus_1`, `cascade_prevent`, `multi_stage_cascade`
+- Four tasks: `single_fault`, `n_minus_1`, `cascade_prevent`, `multi_stage_cascade`
 - Reset-time scenario injection and retry logic for non-convergent starts
 - Shaped reward, episode logging, and deterministic graders
 - OpenEnv WebSocket interface plus `/tasks`, `/grader`, and `/baseline`
@@ -65,32 +65,72 @@ Supporting files outside the minimum template remain for quality and verificatio
 
 ## Recent fixes
 
-1. **Benchmark ranges corrected** (tasks.py lines 248-255):
+1. **Task 1 (single_fault) benchmark ranges corrected** (tasks.py:297-304):
    - `single_fault_easy`: 0.82-0.85 (was mathematically impossible 0.90-0.94)
    - `single_fault_moderate`: 0.86-0.89 (was 0.94-0.97)
    - `single_fault_severe`: 0.90-0.93 (was 0.96-0.99)
+   - Warmup phase finds high-loading state in chronics, then agent has 10 steps to solve
 
-2. **Redispatch penalty added** (grid_environment.py line 58):
-   - `SINGLE_FAULT_REDISPATCH_PENALTY_PER_MW = 0.01` per MW to discourage large interventions
+2. **Task 1 reward function** (grid_environment.py:589-596):
+   - Target achieved bonus: `1.0 / step_count` (rewards early solution)
+   - Safe margin bonus: `0.05 × max(0.0, 1.0 - max_rho)`
+   - Overload penalty: `0.2 × overloaded_count` (lines > 100%)
+   - Redispatch penalty: `0.01 × MW` (discourages large interventions)
+   - Failure penalty: `-5.0` if time limit reached without target
 
-3. **Survival-focused grading** (graders.py):
-   - 70% weight on survival ratio + bonuses
+3. **Task 1 grading** (graders.py:28-55):
+   - 70% weight on survival ratio
+   - 50% target achieved bonus
+   - Final state bonus (0.3 if below target, 0.15/+0.05, 0.05/+0.10)
+   - Legacy success score for early completion: `1.0 - 0.08 × (step - 1)`
 
-4. **Task 2 (n_minus_1) redesign** based on RL2Grid paper:
-   - Three-component reward: 0.3×R_survive + 0.6×R_overload + 0.1×R_cost
-   - Reconnection bonus: +2.0 when safely reconnecting faulted line
+4. **Task 2 (n_minus_1) redesign** based on RL2Grid paper (grid_environment.py:598-609):
+   - Three-component reward: `0.3×R_survive + 0.6×R_overload + 0.1×R_cost`
+   - `R_survive`: +1.0 per step (constant survival signal)
+   - `R_overload`: `(1/n) × Σ clip(1-ρ, -1, 1)` - loading margin quality
+   - `R_cost`: `-0.05 × Σ|ΔMW|/max_ramp` (normalized redispatch cost)
+   - Reconnection bonus: +2.0 when safely reconnecting (grid_environment.py:853-869)
    - Terminal: +10×(s/m)² quadratic survival, -15 blackout
-   - Phase-aware grader: 30% emergency + 50% security + 20% reconnection
+   - Phase-aware grader (graders.py:58-83):
+     - Emergency response (30%): cleared within 5 steps at rho < 0.92
+     - Sustained security (50%): steps 6-20 at rho < 0.90
+     - Reconnection (20%): did agent reconnect line 0?
    - N-1 security score (bridge lines) in prompt
    - **Grading now honest**: score = survival_ratio × mastery_score (no override)
    - Latest eval: 0.952 (was 1.0 with old override)
 
-5. **Task 4 (multi_stage_cascade) added**:
-   - 3 lines disconnected at reset + 15% load increase
+5. **Task 3 (cascade_prevent)** (grid_environment.py:611-628):
+   - 1-2 lines disconnected at reset + 5-15% load increase
+   - Key metric: `timestep_overflow` countdowns (not just max_rho)
+   - Quadratic overflow penalty: `-0.05 × Σ(overflow²)` - line at overflow=2 is 4x more urgent than overflow=1
+   - Reward components:
+     - Cascade prevention: +0.3 if no auto-trip, -2.5 if auto-trip
+     - Thermal margin: +0.1 × mean(clip(1-ρ, -1, 1))
+     - Terminal: +5.0 × (1 - auto_trips/5)² survival bonus, -12.0 blackout
+   - Grading (graders.py:86-121):
+     - Cascade containment (50%): steps without auto-trips / 30
+     - Thermal stability (30%): safe_steps / containment_steps
+     - Recovery speed (20%): how fast recovered from first overload
+   - Latest eval: 0.798 (hard/extreme tiers challenging)
+
+6. **Task 4 (multi_stage_cascade)** (tasks.py:334-337, grid_environment.py:630-647):
+   - 3 lines disconnected at reset + **20% load increase** (not 15%)
    - Three explicit stages (10 steps each) with stage boundaries at step 10 and 20
-   - Island availability assessment at stage boundaries
-   - Candidate filtering prevents grid collapse actions
-   - Four-component grading: stage completion (30%) + load preservation (40%) + island quality (20%) + speed bonus (10%)
+   - Overflow window: 2 (faster cascades than default 3)
+   - Do-nothing survival probe: 5 steps minimum
+   - Island availability assessment at stage boundaries (grid_environment.py:767-814)
+   - Candidate filtering (inference.py:1003-1030): filters unsafe topology disconnects
+   - Reward (grid_environment.py:630-647):
+     - Generation cost: -0.02 × (total_gen / initial_load)
+     - Convergence: +0.5 × available_island_ratio
+     - Load loss penalty: -5.0 × (1 - available_load_ratio) at boundaries only
+     - Terminal win: +8.0 × (available_load_ratio)² if ≥50% load at step 30
+     - Terminal blackout: -12.0
+   - Grading (graders.py:124-174):
+     - Stage completion (30%): survived stages 1, 2, 3
+     - Load preservation (40%): available_load_ratio at end
+     - Island quality (20%): majority islands viable at boundaries
+     - Speed bonus (10%): how fast stability returned each stage
    - Latest eval: 0.929 (31x improvement from 0.027)
 
 ## Planner architecture

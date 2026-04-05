@@ -13,7 +13,7 @@ Key difference from Task 1:
 ## 1. Reset Phase
 
 ```python
-# tasks.py:434-456
+# tasks.py:566-602 (via _reset_n_minus_1)
 def _reset_n_minus_1(env, seed, difficulty_level, scenario_mode, benchmark_tier):
     obs = env.reset(
         seed=seed,
@@ -22,6 +22,8 @@ def _reset_n_minus_1(env, seed, difficulty_level, scenario_mode, benchmark_tier)
     return obs, {
         "faulted_lines": [0],
         "curriculum_stage": "fixed_n_minus_1",
+        "scenario_mode": scenario_mode,
+        "benchmark_tier": benchmark_tier or "n_minus_1_fixed",
         ...
     }
 ```
@@ -68,20 +70,64 @@ Based on how grid operators actually work:
 
 ## 3. Reward Function (RL2Grid-inspired)
 
+From `grid_environment.py:598-609`:
+
 ```python
-# grid_environment.py:588-599
 elif self._task_id == "n_minus_1":
+    # Component 1: Survival signal (+1.0 per step)
     r_survive = 1.0
+    
+    # Component 2: Loading margin quality
     clipped_margins = [max(-1.0, min(1.0, 1.0 - float(rho))) for rho in observation.rho]
     r_overload = sum(clipped_margins) / len(clipped_margins)
+    
+    # Component 3: Redispatch cost (from _n_minus_1_redispatch_cost)
     r_cost = -self._n_minus_1_redispatch_cost(action)
+    
+    # Combined reward
     reward += (0.3 * r_survive) + (0.6 * r_overload) + (0.1 * r_cost)
-    if reconnect_successful and self._reconnection_within_margin(...):
+    
+    # Reconnection bonus (+2.0 if safe)
+    if reconnect_successful and self._reconnection_within_margin(previous_observation=self._last_obs, observation=observation):
         reward += 2.0
-    if reached_time_limit:
-        reward += 10.0 * ((step / max_steps) ** 2)  # quadratic survival
-    elif done:
+    
+    # Terminal rewards
+    if reached_time_limit and not observation.metadata.get("convergence_failed"):
+        reward += 10.0 * ((self._state.step_count / max(1, self._max_steps)) ** 2)
+    elif done and not reached_time_limit:
         reward -= 15.0  # blackout penalty
+```
+
+### Components
+
+| Component | Formula | Weight | Purpose |
+|-----------|---------|--------|---------|
+| `R_survive` | +1.0 per step | 0.3 | Constant survival signal |
+| `R_overload` | (1/n) × Σ clip(1-ρ, -1, 1) | 0.6 | Loading margin quality |
+| `R_cost` | -0.05 × Σ|ΔMW|/ramp | 0.1 | Economic cost of redispatch |
+| `R_reconnect` | +2.0 if safe reconnection | - | Heuristic from winning agents |
+| Terminal | +10×(s/m)² / -15 | - | Quadratic survival / blackout |
+
+### Reconnection Detection & Validation
+
+From `grid_environment.py:853-869` (`_detect_successful_reconnection`):
+```python
+def _detect_successful_reconnection(previous_observation, observation, action):
+    # Check if any requested reconnection actually succeeded
+    requested_reconnects = {line_id for line_id, status in action.line_set.items() if status == 1}
+    for idx, (before, after) in enumerate(zip(previous_observation.line_status, observation.line_status)):
+        if not before and after and idx in requested_reconnects:
+            return True
+    return False
+```
+
+From `grid_environment.py:728-737` (`_reconnection_within_margin`):
+```python
+def _reconnection_within_margin(previous_observation, observation):
+    # Ensure reconnection doesn't worsen max_rho by more than 10%
+    previous_max = max(previous_observation.rho)
+    current_max = max(observation.rho)
+    return current_max <= previous_max + 0.1
 ```
 
 ### Components
@@ -140,35 +186,51 @@ N-1 STRUCTURAL SECURITY: score=0.941; bridge_lines=[4, 11, 15]
 
 ## 6. Grading (Phase-Aware)
 
+From `graders.py:58-83`:
+
 ```python
-# graders.py:56-80
-def grade_n_minus_1(episode_log, max_steps=20):
-    # Survival gates the score
-    survival_ratio = min(1.0, len(episode_log) / max_steps)
+def grade_n_minus_1(episode_log: list[EpisodeStepLog], max_steps: int = 20) -> float:
+    if not episode_log:
+        return 0.0
     
     # Component A: Emergency response (30%)
     emergency_clear_step = next(
-        (entry.step for entry in episode_log[:5] if max_rho < 0.92),
+        (entry.step for entry in episode_log[:5] if float(entry.max_rho) < 0.92),
         None
     )
-    emergency_score = max(0, 1.0 - 0.2 × max(0, emergency_clear_step - 1))
+    emergency_score = (
+        max(0.0, 1.0 - (0.2 * max(0, emergency_clear_step - 1)))
+        if emergency_clear_step is not None
+        else 0.0
+    )
     
     # Component B: Sustained security (50%)
-    phase2_logs = [e for e in episode_log if e.step >= 6]
-    security_ratio = sum(1 for e in phase2_logs if max_rho < 0.90) / 15
+    # Phase 2: steps 6-20 (15 steps)
+    phase2_logs = [entry for entry in episode_log if entry.step >= 6]
+    security_ratio = (
+        sum(1 for entry in phase2_logs if float(entry.max_rho) < 0.90) / 15.0
+        if phase2_logs
+        else 0.0
+    )
     
     # Component C: Reconnection (20%)
-    reconnection_score = 1.0 if any(0 not in e.disconnected_lines) else 0.0
+    # Did line 0 get reconnected at any point?
+    reconnection_score = 1.0 if any(0 not in entry.disconnected_lines for entry in episode_log) else 0.0
     
-    mastery_score = 0.30 × emergency + 0.50 × security + 0.20 × reconnect
+    # Survival gates the score
+    survival_ratio = min(max_steps, max(entry.step for entry in episode_log)) / max_steps
+    
+    # Mastery = weighted combination
+    mastery_score = (0.30 * emergency_score) + (0.50 * security_ratio) + (0.20 * reconnection_score)
     
     # Final: survival × mastery (no legacy override)
-    return survival_ratio × mastery_score
+    final_score = mastery_score * survival_ratio
+    return round(min(1.0, max(0.0, final_score)), 6)
 ```
 
 | Component | Weight | What it measures |
 |-----------|--------|------------------|
-| Emergency response | 30% | Cleared within 5 steps? |
+| Emergency response | 30% | Cleared within 5 steps? (0.92 threshold) |
 | Sustained security | 50% | Steps 6-20 with rho < 0.90? |
 | Reconnection | 20% | Did agent reconnect line 0? |
 
@@ -267,12 +329,14 @@ Behavior observed:
 
 | File | Purpose |
 |------|---------|
-| `tasks.py:434` | Scenario injection (line 0 disconnection) |
-| `grid_environment.py:588` | Three-component reward function |
-| `grid_environment.py:689` | Reconnection margin check |
-| `graph_analysis.py:129` | N-1 security score calculation |
-| `graders.py:56` | Phase-aware grader |
-| `inference.py:521` | Prompt with two-threshold framing |
+| `tasks.py:115-132` | Task 2 task spec and reset dispatch |
+| `tasks.py:566-602` | `_reset_n_minus_1` - line 0 disconnection |
+| `grid_environment.py:598-609` | Three-component reward function |
+| `grid_environment.py:728-737` | `_reconnection_within_margin` - safety check |
+| `grid_environment.py:853-869` | `_detect_successful_reconnection` |
+| `graders.py:58-83` | Phase-aware grader |
+| `graph_analysis.py` | N-1 security score (bridge line analysis) |
+| `inference.py` | Prompt with two-threshold framing (EMERGENCY/WARNING/SAFE) |
 
 ---
 

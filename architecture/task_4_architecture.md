@@ -611,18 +611,19 @@ MSCF RULE: Prefer actions that preserve transferable generation and keep islands
 | File | Line Numbers | Purpose |
 |------|------------|---------|
 | `grid2op_env/server/tasks.py` | 53-62 | Task definition |
-| `grid2op_env/server/tasks.py` | 70-74 | Line triplets |
-| `grid2op_env/server/tasks.py` | 335-338 | Profile function |
-| `grid2op_env/server/tasks.py` | 566-620 | Reset function |
-| `grid2op_env/server/tasks.py` | 623-633 | Survival probe |
-| `grid2op_env/server/grid_environment.py` | 63-66 | Reward constants |
+| `grid2op_env/server/tasks.py` | 70-74 | Line triplets: (2,4,14), (2,4,15), (4,14,16) |
+| `grid2op_env/server/tasks.py` | 334-337 | Profile function: returns 1.20 (20% load) |
+| `grid2op_env/server/tasks.py` | 565-620 | Reset function with survival probe |
+| `grid2op_env/server/tasks.py` | 623-633 | Survival probe function |
+| `grid2op_env/server/grid_environment.py` | 63-66 | Reward constants (0.02, 5.0, 0.5, 8.0) |
 | `grid2op_env/server/grid_environment.py` | 630-647 | Reward function |
-| `grid2op_env/server/grid_environment.py` | 750-765 | Stage metadata |
-| `grid2op_env/server/grid_environment.py` | 767-814 | Island assessment |
-| `grid2op_env/server/grid_environment.py` | 816-849 | Connected components |
-| `grid2op_env/server/graders.py` | 124-174 | Grading function |
-| `grid2op_env/inference.py` | 606-648 | LLM prompt |
-| `grid2op_env/models.py` | 54-59 | EpisodeStepLog fields |
+| `grid2op_env/server/grid_environment.py` | 750-765 | Stage metadata computation |
+| `grid2op_env/server/grid_environment.py` | 767-814 | Island availability assessment |
+| `grid2op_env/server/grid_environment.py` | 816-849 | Connected components detection |
+| `grid2op_env/server/graders.py` | 124-174 | Four-component grading |
+| `grid2op_env/inference.py` | 606-648 | LLM prompt with stage context |
+| `grid2op_env/inference.py` | 1003-1030 | Candidate filtering (removes unsafe disconnects) |
+| `grid2op_env/models.py` | 54-59 | EpisodeStepLog fields for Task 4 |
 
 ---
 
