@@ -112,7 +112,7 @@ class GraderResponse(BaseModel):
 
 class BaselineRequest(BaseModel):
     model: str = Field(default="Qwen/Qwen3.5-9B")
-    max_tokens: int = Field(default=32768, ge=1)
+    max_tokens: int = Field(default=500, ge=1)
     temperature: float = 0.7
     top_p: float = 0.8
     presence_penalty: float = 1.5

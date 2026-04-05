@@ -18,7 +18,12 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from grid2op_env import BaselineRequest, BaselineScores, GridAction, GridEnv
-from grid2op_env.models import GridObservation, RedispatchGeneratorContext, ScenarioMode, TaskId
+from grid2op_env.models import (
+    GridObservation,
+    RedispatchGeneratorContext,
+    ScenarioMode,
+    TaskId,
+)
 from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
 
 
@@ -49,6 +54,13 @@ def _load_env() -> None:
 _load_env()
 configure_logging()
 logger = logging.getLogger(__name__)
+
+TASK_SEED_OVERRIDES: dict[TaskId, int] = {
+    "single_fault": 2,
+    "cascade_prevent": 2,
+}
+HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
+HF_ROUTER_DEFAULT_MODEL = "openai/gpt-oss-safeguard-20b:groq"
 
 
 @dataclass
@@ -82,6 +94,61 @@ class SimulationOutcome:
     raw_result: dict[str, Any]
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _use_local_llm_setup() -> bool:
+    if "local_setup" in os.environ:
+        return _env_flag("local_setup", True)
+    return _env_flag("LOCAL_SETUP", True)
+
+
+def _default_model_name() -> str:
+    if _use_local_llm_setup():
+        return os.environ.get("OPENAI_MODEL", "Qwen/Qwen3.5-9B")
+    return os.environ.get("HF_ROUTER_MODEL", HF_ROUTER_DEFAULT_MODEL)
+
+
+def _build_llm_client() -> OpenAI:
+    if _use_local_llm_setup():
+        return OpenAI()
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        raise RuntimeError(
+            "HF Router mode requires HF_TOKEN in the environment when local_setup=false."
+        )
+    return OpenAI(
+        base_url=HF_ROUTER_BASE_URL,
+        api_key=hf_token,
+    )
+
+
+def _chat_completion_kwargs(
+    llm_config: BaselineConfig,
+    prompt: str,
+) -> dict[str, Any]:
+    request_kwargs: dict[str, Any] = {
+        "model": llm_config.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": llm_config.max_tokens,
+        "temperature": llm_config.temperature,
+        "top_p": llm_config.top_p,
+        "presence_penalty": llm_config.presence_penalty,
+    }
+    if _use_local_llm_setup():
+        request_kwargs["extra_body"] = {
+            "top_k": llm_config.top_k,
+            "min_p": llm_config.min_p,
+            "repetition_penalty": llm_config.repetition_penalty,
+            "chat_template_kwargs": {"enable_thinking": llm_config.enable_thinking},
+        }
+    return request_kwargs
+
+
 def run_baseline_suite(
     base_url: str,
     config: BaselineRequest | None = None,
@@ -92,7 +159,7 @@ def run_baseline_suite(
     attach_file_logger(run_paths["log"])
 
     request_config = config or BaselineRequest(
-        model=os.environ.get("OPENAI_MODEL", "Qwen/Qwen3.5-9B")
+        model=_default_model_name()
     )
     llm_config = BaselineConfig(
         model=request_config.model,
@@ -109,37 +176,46 @@ def run_baseline_suite(
         scenario_mode=request_config.scenario_mode,
     )
 
-    client = OpenAI()
+    client = _build_llm_client()
     selected_task_ids = list(task_ids) if task_ids is not None else list(TASKS.keys())
     scores: Dict[TaskId, float] = {}
     episode_lengths: Dict[TaskId, int] = {}
     evaluation_records: list[dict[str, Any]] = []
     logger.info(
-        "Starting baseline suite base_url=%s model=%s num_seeds=%s seed_start=%s",
+        "Starting baseline suite base_url=%s model=%s num_seeds=%s seed_start=%s local_setup=%s",
         base_url,
         llm_config.model,
         llm_config.num_seeds,
         llm_config.seed_start,
+        _use_local_llm_setup(),
     )
 
     with GridEnv(base_url=base_url).sync() as env:
-        task_metrics: Dict[TaskId, list[dict[str, Any]]] = {task_id: [] for task_id in selected_task_ids}
-        task_episode_counts: Dict[TaskId, int] = {task_id: 0 for task_id in selected_task_ids}
+        task_metrics: Dict[TaskId, list[dict[str, Any]]] = {
+            task_id: [] for task_id in selected_task_ids
+        }
+        task_episode_counts: Dict[TaskId, int] = {
+            task_id: 0 for task_id in selected_task_ids
+        }
         for task_id in selected_task_ids:
             task = TASKS[task_id]
             benchmark_tiers = benchmark_tiers_for_task(task_id)
+            task_num_seeds = TASK_SEED_OVERRIDES.get(task_id, llm_config.num_seeds)
             for benchmark_tier in benchmark_tiers:
-                for seed in range(llm_config.seed_start, llm_config.seed_start + llm_config.num_seeds):
+                for seed in range(
+                    llm_config.seed_start, llm_config.seed_start + task_num_seeds
+                ):
                     task_episode_counts[task_id] += 1
                     curriculum_episode = task_episode_counts[task_id]
                     episode_started_at = perf_counter()
                     logger.info(
-                        "Baseline episode start task_id=%s seed=%s curriculum_episode=%s benchmark_tier=%s max_steps=%s",
+                        "Baseline episode start task_id=%s seed=%s curriculum_episode=%s benchmark_tier=%s max_steps=%s task_num_seeds=%s",
                         task_id,
                         seed,
                         curriculum_episode,
                         benchmark_tier,
                         task.max_steps,
+                        task_num_seeds,
                     )
                     result = env.reset(
                         task_id=task_id,
@@ -155,8 +231,14 @@ def run_baseline_suite(
                         seed,
                         state.episode_id,
                         state.scenario_metadata,
-                        float(max(result.observation.rho)) if result.observation.rho else 0.0,
-                        [idx for idx, status in enumerate(result.observation.line_status) if not status],
+                        float(max(result.observation.rho))
+                        if result.observation.rho
+                        else 0.0,
+                        [
+                            idx
+                            for idx, status in enumerate(result.observation.line_status)
+                            if not status
+                        ],
                     )
 
                     step_idx = 0
@@ -178,19 +260,27 @@ def run_baseline_suite(
                             {
                                 "step": step_idx + 1,
                                 "proposal_prompt": planning_trace["proposal_prompt"],
-                                "proposal_raw_output": planning_trace["proposal_raw_output"],
+                                "proposal_raw_output": planning_trace[
+                                    "proposal_raw_output"
+                                ],
                                 "proposal_trace": planning_trace["proposal_trace"],
-                                "graph_intelligence": planning_trace["graph_intelligence"],
+                                "graph_intelligence": planning_trace[
+                                    "graph_intelligence"
+                                ],
                                 "simulations": planning_trace["simulations"],
                                 "final_prompt": planning_trace["final_prompt"],
                                 "final_raw_output": planning_trace["final_raw_output"],
                                 "final_trace": planning_trace["final_trace"],
                                 "selected_action": action.model_dump(),
                                 "observation_summary": {
-                                    "max_rho": max(result.observation.rho) if result.observation.rho else 0.0,
+                                    "max_rho": max(result.observation.rho)
+                                    if result.observation.rho
+                                    else 0.0,
                                     "disconnected_lines": [
                                         idx
-                                        for idx, status in enumerate(result.observation.line_status)
+                                        for idx, status in enumerate(
+                                            result.observation.line_status
+                                        )
                                         if not status
                                     ],
                                     "timestep_overflow": result.observation.timestep_overflow,
@@ -223,7 +313,9 @@ def run_baseline_suite(
                         f"{base_url}/grader",
                         json={
                             "task_id": task_id,
-                            "episode_log": [entry.model_dump() for entry in state.episode_log],
+                            "episode_log": [
+                                entry.model_dump() for entry in state.episode_log
+                            ],
                         },
                         timeout=60,
                     )
@@ -234,11 +326,17 @@ def run_baseline_suite(
                     episode_log = [entry.model_dump() for entry in state.episode_log]
                     episode_wall_time_s = round(perf_counter() - episode_started_at, 6)
                     total_redispatch_mw = round(
-                        sum(float(entry.get("redispatch_mw", 0.0)) for entry in episode_log),
+                        sum(
+                            float(entry.get("redispatch_mw", 0.0))
+                            for entry in episode_log
+                        ),
                         6,
                     )
                     total_action_penalty = round(
-                        sum(float(entry.get("action_penalty", 0.0)) for entry in episode_log),
+                        sum(
+                            float(entry.get("action_penalty", 0.0))
+                            for entry in episode_log
+                        ),
                         6,
                     )
                     record = {
@@ -251,7 +349,9 @@ def run_baseline_suite(
                         "episode_wall_time_s": episode_wall_time_s,
                         "done": state.done,
                         "do_nothing_steps": do_nothing_steps,
-                        "non_do_nothing_steps": max(0, episode_length - do_nothing_steps),
+                        "non_do_nothing_steps": max(
+                            0, episode_length - do_nothing_steps
+                        ),
                         "episode_total_redispatch_mw": total_redispatch_mw,
                         "episode_action_penalty_total": total_action_penalty,
                         "episode_action_penalty_mean": round(
@@ -347,18 +447,7 @@ def choose_action_with_qwen(
     )
 
     response = client.chat.completions.create(
-        model=llm_config.model,
-        messages=[{"role": "user", "content": proposal_prompt}],
-        max_tokens=llm_config.max_tokens,
-        temperature=llm_config.temperature,
-        top_p=llm_config.top_p,
-        presence_penalty=llm_config.presence_penalty,
-        extra_body={
-            "top_k": llm_config.top_k,
-            "min_p": llm_config.min_p,
-            "repetition_penalty": llm_config.repetition_penalty,
-            "chat_template_kwargs": {"enable_thinking": llm_config.enable_thinking},
-        },
+        **_chat_completion_kwargs(llm_config=llm_config, prompt=proposal_prompt)
     )
 
     proposal_raw_output = response.choices[0].message.content or ""
@@ -427,7 +516,9 @@ def choose_action_with_qwen(
             "proposal_raw_output": proposal_raw_output,
             "proposal_trace": {**proposal_trace, **prefilter_trace},
             "graph_intelligence": graph_intelligence,
-            "simulations": [serialize_simulation_outcome(outcome) for outcome in simulations],
+            "simulations": [
+                serialize_simulation_outcome(outcome) for outcome in simulations
+            ],
             "final_prompt": "",
             "final_raw_output": "",
             "final_trace": {
@@ -445,18 +536,7 @@ def choose_action_with_qwen(
         simulations=selectable_simulations,
     )
     final_response = client.chat.completions.create(
-        model=llm_config.model,
-        messages=[{"role": "user", "content": final_prompt}],
-        max_tokens=llm_config.max_tokens,
-        temperature=llm_config.temperature,
-        top_p=llm_config.top_p,
-        presence_penalty=llm_config.presence_penalty,
-        extra_body={
-            "top_k": llm_config.top_k,
-            "min_p": llm_config.min_p,
-            "repetition_penalty": llm_config.repetition_penalty,
-            "chat_template_kwargs": {"enable_thinking": llm_config.enable_thinking},
-        },
+        **_chat_completion_kwargs(llm_config=llm_config, prompt=final_prompt)
     )
     final_raw_output = final_response.choices[0].message.content or ""
     logger.info(
@@ -478,7 +558,9 @@ def choose_action_with_qwen(
         "proposal_raw_output": proposal_raw_output,
         "proposal_trace": {**proposal_trace, **prefilter_trace},
         "graph_intelligence": graph_intelligence,
-        "simulations": [serialize_simulation_outcome(outcome) for outcome in simulations],
+        "simulations": [
+            serialize_simulation_outcome(outcome) for outcome in simulations
+        ],
         "final_prompt": final_prompt,
         "final_raw_output": final_raw_output,
         "final_trace": final_trace,
@@ -500,7 +582,9 @@ def build_proposal_prompt(
     stressed_lines = summarize_lines(observation.rho, limit=8, minimum_rho=0.7)
     sensitivity_guidance = observation.sensitivity_guidance[:3]
     topology_guidance = [
-        item for item in sensitivity_guidance if item.get("action_type") == "disconnect_line"
+        item
+        for item in sensitivity_guidance
+        if item.get("action_type") == "disconnect_line"
     ]
     redispatch_guidance = [
         item for item in sensitivity_guidance if item.get("action_type") == "redispatch"
@@ -513,11 +597,19 @@ def build_proposal_prompt(
     generator_summary = summarize_generators(observation.gen_p, limit=6)
     cooldown_info = observation.metadata.get("time_before_cooldown_line", [])
     stage_index = int(observation.metadata.get("stage_index", 1))
-    steps_to_stage_boundary = int(observation.metadata.get("steps_to_stage_boundary", 0))
+    steps_to_stage_boundary = int(
+        observation.metadata.get("steps_to_stage_boundary", 0)
+    )
     available_load_ratio = float(observation.metadata.get("available_load_ratio", 1.0))
-    available_island_ratio = float(observation.metadata.get("available_island_ratio", 1.0))
-    stage_boundary_assessed = bool(observation.metadata.get("stage_boundary_assessed", False))
-    majority_islands_available = bool(observation.metadata.get("majority_islands_available", False))
+    available_island_ratio = float(
+        observation.metadata.get("available_island_ratio", 1.0)
+    )
+    stage_boundary_assessed = bool(
+        observation.metadata.get("stage_boundary_assessed", False)
+    )
+    majority_islands_available = bool(
+        observation.metadata.get("majority_islands_available", False)
+    )
     lines = [
         "You are a grid operator proposing actions for a deterministic simulator.",
         "Propose exactly 3 candidate actions to test in the physics sandbox.",
@@ -532,18 +624,24 @@ def build_proposal_prompt(
         f"max_rho={max(observation.rho):.3f}" if observation.rho else "max_rho=0.0",
         f"line_count={line_count}",
         f"generator_count={gen_count}",
-        "redispatchable_generators=" + json.dumps([int(x) for x in redispatchable_generators], separators=(",", ":")),
+        "redispatchable_generators="
+        + json.dumps(
+            [int(x) for x in redispatchable_generators], separators=(",", ":")
+        ),
         "redispatch_generator_bounds="
         + json.dumps(
             [context.model_dump() for context in redispatch_generators],
             separators=(",", ":"),
         ),
         "stressed_lines=" + json.dumps(stressed_lines, separators=(",", ":")),
-        "sensitivity_guidance=" + json.dumps(sensitivity_guidance, separators=(",", ":")),
+        "sensitivity_guidance="
+        + json.dumps(sensitivity_guidance, separators=(",", ":")),
         "disconnected_lines=" + json.dumps(disconnected, separators=(",", ":")),
         "generators=" + json.dumps(generator_summary, separators=(",", ":")),
-        "timestep_overflow=" + json.dumps(observation.timestep_overflow, separators=(",", ":")),
-        "grid_topology_intelligence=" + json.dumps(graph_intelligence, separators=(",", ":")),
+        "timestep_overflow="
+        + json.dumps(observation.timestep_overflow, separators=(",", ":")),
+        "grid_topology_intelligence="
+        + json.dumps(graph_intelligence, separators=(",", ":")),
     ]
     if task_id == "single_fault":
         lines.insert(
@@ -551,11 +649,17 @@ def build_proposal_prompt(
             "TASK RULE: For single_fault, do not propose disconnect_line or reconnect_line. Use redispatch and do_nothing only. Solve congestion by shifting generation, not by cutting topology.",
         )
     if task_id == "n_minus_1":
-        danger_lines = [entry for entry in stressed_lines if float(entry["rho"]) >= 0.92]
-        warning_lines = [entry for entry in stressed_lines if 0.80 <= float(entry["rho"]) < 0.92]
-        cooldown_zero_lines = [
-            int(idx) for idx, value in enumerate(cooldown_info) if int(value) == 0
-        ] if isinstance(cooldown_info, list) else []
+        danger_lines = [
+            entry for entry in stressed_lines if float(entry["rho"]) >= 0.92
+        ]
+        warning_lines = [
+            entry for entry in stressed_lines if 0.80 <= float(entry["rho"]) < 0.92
+        ]
+        cooldown_zero_lines = (
+            [int(idx) for idx, value in enumerate(cooldown_info) if int(value) == 0]
+            if isinstance(cooldown_info, list)
+            else []
+        )
         lines.insert(
             6,
             "TASK RULE: In n_minus_1, operate the degraded topology safely for 20 steps. Reconnect the faulted line when cooldown allows and when simulation shows it is safe.",
@@ -578,7 +682,8 @@ def build_proposal_prompt(
         )
         lines.insert(
             11,
-            "RECONNECT_WINDOW_LINES=" + json.dumps(cooldown_zero_lines, separators=(",", ":")),
+            "RECONNECT_WINDOW_LINES="
+            + json.dumps(cooldown_zero_lines, separators=(",", ":")),
         )
     if task_id == "cascade_prevent":
         overflow_urgent = [
@@ -590,7 +695,9 @@ def build_proposal_prompt(
             for idx, value in enumerate(observation.timestep_overflow)
             if int(value) > 0
         ]
-        overflow_urgent.sort(key=lambda item: (item["timestep_overflow"], item["rho"]), reverse=True)
+        overflow_urgent.sort(
+            key=lambda item: (item["timestep_overflow"], item["rho"]), reverse=True
+        )
         lines.insert(
             6,
             "TASK RULE: In cascade_prevent, prioritize lines with active overflow countdowns. A line with timestep_overflow=2 is more urgent than a line with high rho but overflow=0.",
@@ -601,7 +708,8 @@ def build_proposal_prompt(
         )
         lines.insert(
             8,
-            "OVERFLOW_COUNTDOWNS=" + json.dumps(overflow_urgent[:8], separators=(",", ":")),
+            "OVERFLOW_COUNTDOWNS="
+            + json.dumps(overflow_urgent[:8], separators=(",", ":")),
         )
     if task_id == "multi_stage_cascade":
         overflow_urgent = [
@@ -613,7 +721,9 @@ def build_proposal_prompt(
             for idx, value in enumerate(observation.timestep_overflow)
             if int(value) > 0
         ]
-        overflow_urgent.sort(key=lambda item: (item["timestep_overflow"], item["rho"]), reverse=True)
+        overflow_urgent.sort(
+            key=lambda item: (item["timestep_overflow"], item["rho"]), reverse=True
+        )
         lines.insert(
             6,
             "TASK RULE: In multi_stage_cascade, assume the collapse will continue across three stages. Do not optimize only for this step; position the grid so later stages keep more load available.",
@@ -636,15 +746,18 @@ def build_proposal_prompt(
         )
         lines.insert(
             11,
-            "CONTROLLED_ISLANDING_CANDIDATES=" + json.dumps(topology_guidance, separators=(",", ":")),
+            "CONTROLLED_ISLANDING_CANDIDATES="
+            + json.dumps(topology_guidance, separators=(",", ":")),
         )
         lines.insert(
             12,
-            "REDISPATCH_CANDIDATES=" + json.dumps(redispatch_guidance, separators=(",", ":")),
+            "REDISPATCH_CANDIDATES="
+            + json.dumps(redispatch_guidance, separators=(",", ":")),
         )
         lines.insert(
             13,
-            "OVERFLOW_COUNTDOWNS=" + json.dumps(overflow_urgent[:8], separators=(",", ":")),
+            "OVERFLOW_COUNTDOWNS="
+            + json.dumps(overflow_urgent[:8], separators=(",", ":")),
         )
     if include_task_description:
         lines.append("task_description=" + TASKS[task_id].description)
@@ -664,7 +777,11 @@ def build_final_selection_prompt(
     max_steps: int,
     simulations: Sequence[SimulationOutcome],
 ) -> str:
-    task4_hints = build_task4_selection_hints(simulations) if task_id == "multi_stage_cascade" else {}
+    task4_hints = (
+        build_task4_selection_hints(simulations)
+        if task_id == "multi_stage_cascade"
+        else {}
+    )
     lines = [
         "You are a grid operator choosing a final action after reviewing simulator outcomes.",
         "Select the safest candidate that reduces stress without ending the episode.",
@@ -675,8 +792,11 @@ def build_final_selection_prompt(
         "Rules: no markdown, no prose, no code fences, no extra keys.",
         f"task_id={task_id}",
         f"step={step_count + 1}/{max_steps}",
-        f"current_max_rho={max(observation.rho):.3f}" if observation.rho else "current_max_rho=0.0",
-        "simulation_results=" + json.dumps(
+        f"current_max_rho={max(observation.rho):.3f}"
+        if observation.rho
+        else "current_max_rho=0.0",
+        "simulation_results="
+        + json.dumps(
             [serialize_simulation_outcome(outcome) for outcome in simulations],
             separators=(",", ":"),
         ),
@@ -718,11 +838,11 @@ def build_task4_selection_hints(
         None,
     )
     redispatch = [
-        outcome for outcome in simulations if outcome.action.redispatch and not outcome.action.line_set
+        outcome
+        for outcome in simulations
+        if outcome.action.redispatch and not outcome.action.line_set
     ]
-    topology = [
-        outcome for outcome in simulations if outcome.action.line_set
-    ]
+    topology = [outcome for outcome in simulations if outcome.action.line_set]
     best_redispatch = (
         min(redispatch, key=lambda outcome: (outcome.max_rho, outcome.candidate_index))
         if redispatch
@@ -731,7 +851,8 @@ def build_task4_selection_hints(
     prefer_redispatch_indices = [
         outcome.candidate_index
         for outcome in redispatch
-        if best_do_nothing is not None and outcome.max_rho < best_do_nothing.max_rho - 1e-9
+        if best_do_nothing is not None
+        and outcome.max_rho < best_do_nothing.max_rho - 1e-9
     ]
     topology_justified_indices = [
         outcome.candidate_index
@@ -741,14 +862,20 @@ def build_task4_selection_hints(
         or len(outcome.overloaded_line_ids) < len(best_redispatch.overloaded_line_ids)
     ]
     return {
-        "best_do_nothing_index": best_do_nothing.candidate_index if best_do_nothing else None,
-        "best_redispatch_index": best_redispatch.candidate_index if best_redispatch else None,
+        "best_do_nothing_index": best_do_nothing.candidate_index
+        if best_do_nothing
+        else None,
+        "best_redispatch_index": best_redispatch.candidate_index
+        if best_redispatch
+        else None,
         "prefer_redispatch_indices": prefer_redispatch_indices,
         "topology_justified_indices": topology_justified_indices,
     }
 
 
-def summarize_lines(rho: Sequence[float], limit: int, minimum_rho: float) -> list[dict[str, Any]]:
+def summarize_lines(
+    rho: Sequence[float], limit: int, minimum_rho: float
+) -> list[dict[str, Any]]:
     return sorted(
         (
             {"line_id": idx, "rho": round(float(value), 4)}
@@ -825,7 +952,12 @@ def parse_candidate_proposals(
         seen.add(key)
         deduped.append((action, trace))
 
-    fallback_pool = [(GridAction(do_nothing=True), {"decision": "do_nothing", "reason": "fallback_baseline"})]
+    fallback_pool = [
+        (
+            GridAction(do_nothing=True),
+            {"decision": "do_nothing", "reason": "fallback_baseline"},
+        )
+    ]
     if redispatch_generators:
         for context in redispatch_generators:
             for delta in context.allowed_deltas:
@@ -843,8 +975,14 @@ def parse_candidate_proposals(
     else:
         fallback_pool.extend(
             [
-                (GridAction(redispatch={0: 10.0}), {"decision": "redispatch", "reason": "fallback_generator_0_up"}),
-                (GridAction(redispatch={0: -10.0}), {"decision": "redispatch", "reason": "fallback_generator_0_down"}),
+                (
+                    GridAction(redispatch={0: 10.0}),
+                    {"decision": "redispatch", "reason": "fallback_generator_0_up"},
+                ),
+                (
+                    GridAction(redispatch={0: -10.0}),
+                    {"decision": "redispatch", "reason": "fallback_generator_0_down"},
+                ),
             ]
         )
     for action, trace in fallback_pool:
@@ -871,7 +1009,9 @@ def filter_candidate_proposals(
     del observation
     filtered: list[tuple[GridAction, dict[str, Any]]] = []
     rejected: list[dict[str, Any]] = []
-    safe_disconnect = {int(line_id) for line_id in graph_intelligence.get("safe_to_disconnect", [])}
+    safe_disconnect = {
+        int(line_id) for line_id in graph_intelligence.get("safe_to_disconnect", [])
+    }
 
     for action, trace in proposal_candidates:
         if task_id == "multi_stage_cascade":
@@ -891,7 +1031,12 @@ def filter_candidate_proposals(
         filtered.append((action, trace))
 
     if not filtered:
-        filtered = [(GridAction(do_nothing=True), {"decision": "do_nothing", "reason": "all_candidates_prefiltered"})]
+        filtered = [
+            (
+                GridAction(do_nothing=True),
+                {"decision": "do_nothing", "reason": "all_candidates_prefiltered"},
+            )
+        ]
 
     deduped: list[tuple[GridAction, dict[str, Any]]] = []
     seen: set[str] = set()
@@ -980,7 +1125,9 @@ def choose_best_simulation(
         if not outcome.done and not outcome.convergence_failed
     ]
     if safe:
-        current_max_rho = max(observation.rho) if observation and observation.rho else None
+        current_max_rho = (
+            max(observation.rho) if observation and observation.rho else None
+        )
         if task_id == "single_fault":
             improving = [
                 outcome
@@ -1065,9 +1212,15 @@ def validate_baseline_action(
     )
     action_type = payload.get("action_type")
     if payload.get("do_nothing") or action_type == "do_nothing":
-        return GridAction(do_nothing=True), {"decision": "do_nothing", "reason": payload.get("reason", "explicit_do_nothing")}
+        return GridAction(do_nothing=True), {
+            "decision": "do_nothing",
+            "reason": payload.get("reason", "explicit_do_nothing"),
+        }
 
-    if task_id == "single_fault" and action_type in {"disconnect_line", "reconnect_line"}:
+    if task_id == "single_fault" and action_type in {
+        "disconnect_line",
+        "reconnect_line",
+    }:
         return GridAction(do_nothing=True), {
             "decision": "fallback_do_nothing",
             "reason": f"{action_type}_forbidden_for_single_fault",
@@ -1102,7 +1255,10 @@ def validate_baseline_action(
                 GridAction(line_set={line_id: -1}, redispatch={}),
                 {"decision": "disconnect_line", "reason": payload.get("reason", "")},
             )
-        return GridAction(do_nothing=True), {"decision": "fallback_do_nothing", "reason": "invalid_disconnect_line"}
+        return GridAction(do_nothing=True), {
+            "decision": "fallback_do_nothing",
+            "reason": "invalid_disconnect_line",
+        }
 
     if action_type == "reconnect_line":
         line_id = payload.get("line_id")
@@ -1115,7 +1271,10 @@ def validate_baseline_action(
                 GridAction(line_set={line_id: 1}, redispatch={}),
                 {"decision": "reconnect_line", "reason": payload.get("reason", "")},
             )
-        return GridAction(do_nothing=True), {"decision": "fallback_do_nothing", "reason": "invalid_reconnect_line"}
+        return GridAction(do_nothing=True), {
+            "decision": "fallback_do_nothing",
+            "reason": "invalid_reconnect_line",
+        }
 
     if action_type == "redispatch":
         gen_id = payload.get("gen_id")
@@ -1133,14 +1292,22 @@ def validate_baseline_action(
             and delta is not None
         ):
             if gen_id in redispatch_context_by_id:
-                delta = constrain_redispatch_delta(delta, redispatch_context_by_id[gen_id])
+                delta = constrain_redispatch_delta(
+                    delta, redispatch_context_by_id[gen_id]
+                )
                 if delta is None:
-                    return GridAction(do_nothing=True), {"decision": "fallback_do_nothing", "reason": "invalid_redispatch"}
+                    return GridAction(do_nothing=True), {
+                        "decision": "fallback_do_nothing",
+                        "reason": "invalid_redispatch",
+                    }
             return (
                 GridAction(redispatch={gen_id: delta}, line_set={}),
                 {"decision": "redispatch", "reason": payload.get("reason", "")},
             )
-        return GridAction(do_nothing=True), {"decision": "fallback_do_nothing", "reason": "invalid_redispatch"}
+        return GridAction(do_nothing=True), {
+            "decision": "fallback_do_nothing",
+            "reason": "invalid_redispatch",
+        }
 
     valid_redispatch = {}
     for key, value in redispatch_payload.items():
@@ -1151,13 +1318,18 @@ def validate_baseline_action(
             continue
         if 0 <= gen_id < n_gen and gen_id in allowed_redispatch:
             if gen_id in redispatch_context_by_id:
-                delta = constrain_redispatch_delta(delta, redispatch_context_by_id[gen_id])
+                delta = constrain_redispatch_delta(
+                    delta, redispatch_context_by_id[gen_id]
+                )
                 if delta is None:
                     continue
             valid_redispatch[gen_id] = delta
 
     if not valid_line_set and not valid_redispatch:
-        return GridAction(do_nothing=True), {"decision": "fallback_do_nothing", "reason": "empty_or_invalid_payload"}
+        return GridAction(do_nothing=True), {
+            "decision": "fallback_do_nothing",
+            "reason": "empty_or_invalid_payload",
+        }
     return (
         GridAction(line_set=valid_line_set, redispatch=valid_redispatch),
         {"decision": "legacy_payload", "reason": payload.get("reason", "")},
@@ -1170,14 +1342,21 @@ def constrain_redispatch_delta(
 ) -> float | None:
     if context.allowed_delta_min == 0.0 and context.allowed_delta_max == 0.0:
         return None
-    clamped = min(max(float(delta), float(context.allowed_delta_min)), float(context.allowed_delta_max))
+    clamped = min(
+        max(float(delta), float(context.allowed_delta_min)),
+        float(context.allowed_delta_max),
+    )
     feasible = [
         float(value)
         for value in context.allowed_deltas
-        if float(context.allowed_delta_min) <= float(value) <= float(context.allowed_delta_max)
+        if float(context.allowed_delta_min)
+        <= float(value)
+        <= float(context.allowed_delta_max)
     ]
     if feasible:
-        return min(feasible, key=lambda value: (abs(value - clamped), abs(value), value))
+        return min(
+            feasible, key=lambda value: (abs(value - clamped), abs(value), value)
+        )
     if abs(clamped) < 1e-9:
         return None
     return round(clamped, 4)
@@ -1196,52 +1375,118 @@ def write_evaluation_outputs(
     json_path = run_paths["json"]
     csv_path = run_paths["csv"]
 
+    total_proposal_calls = 0
+    total_final_calls = 0
+    per_task_llm_calls: dict[str, dict[str, int]] = {}
     aggregate: dict[str, Any] = {}
     for task_id in selected_task_ids:
-        records = [record for record in evaluation_records if record["task_id"] == task_id]
+        records = [
+            record for record in evaluation_records if record["task_id"] == task_id
+        ]
         scores = [float(record["score"]) for record in records]
         lengths = [int(record["episode_length"]) for record in records]
-        wall_times = [float(record.get("episode_wall_time_s", 0.0)) for record in records]
+        wall_times = [
+            float(record.get("episode_wall_time_s", 0.0)) for record in records
+        ]
         do_nothing = [int(record["do_nothing_steps"]) for record in records]
-        redispatch_mw = [float(record.get("episode_total_redispatch_mw", 0.0)) for record in records]
-        action_penalty = [float(record.get("episode_action_penalty_total", 0.0)) for record in records]
+        redispatch_mw = [
+            float(record.get("episode_total_redispatch_mw", 0.0)) for record in records
+        ]
+        action_penalty = [
+            float(record.get("episode_action_penalty_total", 0.0)) for record in records
+        ]
+        task_proposal_calls = sum(
+            len(record.get("raw_outputs", [])) for record in records
+        )
+        task_final_calls = sum(
+            1
+            for record in records
+            for step in record.get("raw_outputs", [])
+            if step.get("final_prompt")
+        )
+        total_proposal_calls += task_proposal_calls
+        total_final_calls += task_final_calls
+        per_task_llm_calls[task_id] = {
+            "proposal_calls": task_proposal_calls,
+            "final_calls": task_final_calls,
+            "total_llm_calls": task_proposal_calls + task_final_calls,
+        }
         aggregate[task_id] = {
             "num_episodes": len(records),
             "score_mean": round(mean(scores), 6) if scores else 0.0,
             "score_std": round(pstdev(scores), 6) if len(scores) > 1 else 0.0,
             "episode_length_mean": round(mean(lengths), 6) if lengths else 0.0,
-            "episode_length_std": round(pstdev(lengths), 6) if len(lengths) > 1 else 0.0,
-            "episode_wall_time_mean_s": round(mean(wall_times), 6) if wall_times else 0.0,
-            "episode_wall_time_std_s": round(pstdev(wall_times), 6) if len(wall_times) > 1 else 0.0,
+            "episode_length_std": round(pstdev(lengths), 6)
+            if len(lengths) > 1
+            else 0.0,
+            "episode_wall_time_mean_s": round(mean(wall_times), 6)
+            if wall_times
+            else 0.0,
+            "episode_wall_time_std_s": round(pstdev(wall_times), 6)
+            if len(wall_times) > 1
+            else 0.0,
             "do_nothing_steps_mean": round(mean(do_nothing), 6) if do_nothing else 0.0,
-            "episode_total_redispatch_mw_mean": round(mean(redispatch_mw), 6) if redispatch_mw else 0.0,
-            "episode_action_penalty_total_mean": round(mean(action_penalty), 6) if action_penalty else 0.0,
+            "episode_total_redispatch_mw_mean": round(mean(redispatch_mw), 6)
+            if redispatch_mw
+            else 0.0,
+            "episode_action_penalty_total_mean": round(mean(action_penalty), 6)
+            if action_penalty
+            else 0.0,
+            "proposal_calls": task_proposal_calls,
+            "final_calls": task_final_calls,
+            "total_llm_calls": task_proposal_calls + task_final_calls,
         }
     aggregate_by_tier: dict[str, Any] = {}
-    for benchmark_tier in sorted({record["benchmark_tier"] for record in evaluation_records}):
-        records = [record for record in evaluation_records if record["benchmark_tier"] == benchmark_tier]
+    for benchmark_tier in sorted(
+        {record["benchmark_tier"] for record in evaluation_records}
+    ):
+        records = [
+            record
+            for record in evaluation_records
+            if record["benchmark_tier"] == benchmark_tier
+        ]
         scores = [float(record["score"]) for record in records]
         lengths = [int(record["episode_length"]) for record in records]
-        wall_times = [float(record.get("episode_wall_time_s", 0.0)) for record in records]
+        wall_times = [
+            float(record.get("episode_wall_time_s", 0.0)) for record in records
+        ]
         do_nothing = [int(record["do_nothing_steps"]) for record in records]
-        redispatch_mw = [float(record.get("episode_total_redispatch_mw", 0.0)) for record in records]
-        action_penalty = [float(record.get("episode_action_penalty_total", 0.0)) for record in records]
+        redispatch_mw = [
+            float(record.get("episode_total_redispatch_mw", 0.0)) for record in records
+        ]
+        action_penalty = [
+            float(record.get("episode_action_penalty_total", 0.0)) for record in records
+        ]
         aggregate_by_tier[benchmark_tier] = {
             "num_episodes": len(records),
             "score_mean": round(mean(scores), 6) if scores else 0.0,
             "score_std": round(pstdev(scores), 6) if len(scores) > 1 else 0.0,
             "episode_length_mean": round(mean(lengths), 6) if lengths else 0.0,
-            "episode_wall_time_mean_s": round(mean(wall_times), 6) if wall_times else 0.0,
-            "episode_wall_time_std_s": round(pstdev(wall_times), 6) if len(wall_times) > 1 else 0.0,
+            "episode_wall_time_mean_s": round(mean(wall_times), 6)
+            if wall_times
+            else 0.0,
+            "episode_wall_time_std_s": round(pstdev(wall_times), 6)
+            if len(wall_times) > 1
+            else 0.0,
             "do_nothing_steps_mean": round(mean(do_nothing), 6) if do_nothing else 0.0,
-            "episode_total_redispatch_mw_mean": round(mean(redispatch_mw), 6) if redispatch_mw else 0.0,
-            "episode_action_penalty_total_mean": round(mean(action_penalty), 6) if action_penalty else 0.0,
+            "episode_total_redispatch_mw_mean": round(mean(redispatch_mw), 6)
+            if redispatch_mw
+            else 0.0,
+            "episode_action_penalty_total_mean": round(mean(action_penalty), 6)
+            if action_penalty
+            else 0.0,
         }
 
     payload = {
         "timestamp": timestamp,
         "model": model,
         "base_url": base_url,
+        "llm_usage": {
+            "proposal_calls": total_proposal_calls,
+            "final_calls": total_final_calls,
+            "total_llm_calls": total_proposal_calls + total_final_calls,
+            "per_task_llm_calls": per_task_llm_calls,
+        },
         "sampling": {
             "temperature": llm_config.temperature,
             "top_p": llm_config.top_p,
@@ -1254,6 +1499,7 @@ def write_evaluation_outputs(
             "num_seeds": llm_config.num_seeds,
             "seed_start": llm_config.seed_start,
             "scenario_mode": llm_config.scenario_mode,
+            "task_seed_overrides": TASK_SEED_OVERRIDES,
         },
         "summary": baseline_scores.model_dump(),
         "aggregate": aggregate,
@@ -1295,9 +1541,15 @@ def write_evaluation_outputs(
                     "done": record["done"],
                     "do_nothing_steps": record["do_nothing_steps"],
                     "non_do_nothing_steps": record["non_do_nothing_steps"],
-                    "episode_total_redispatch_mw": record.get("episode_total_redispatch_mw", 0.0),
-                    "episode_action_penalty_total": record.get("episode_action_penalty_total", 0.0),
-                    "episode_action_penalty_mean": record.get("episode_action_penalty_mean", 0.0),
+                    "episode_total_redispatch_mw": record.get(
+                        "episode_total_redispatch_mw", 0.0
+                    ),
+                    "episode_action_penalty_total": record.get(
+                        "episode_action_penalty_total", 0.0
+                    ),
+                    "episode_action_penalty_mean": record.get(
+                        "episode_action_penalty_mean", 0.0
+                    ),
                 }
             )
     logger.info("Wrote evaluation outputs json=%s csv=%s", json_path, csv_path)
@@ -1319,7 +1571,8 @@ def prepare_run_paths(timestamp: str) -> dict[str, Path]:
 def attach_file_logger(log_path: Path) -> None:
     root_logger = logging.getLogger()
     if any(
-        isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path
+        isinstance(handler, logging.FileHandler)
+        and Path(handler.baseFilename) == log_path
         for handler in root_logger.handlers
     ):
         return
@@ -1372,7 +1625,9 @@ def append_evaluation_markdown(
         for benchmark_tier, tier_records in tier_groups.items():
             scores = [float(record["score"]) for record in tier_records]
             lengths = [int(record["episode_length"]) for record in tier_records]
-            wall_times = [float(record.get("episode_wall_time_s", 0.0)) for record in tier_records]
+            wall_times = [
+                float(record.get("episode_wall_time_s", 0.0)) for record in tier_records
+            ]
             do_nothing = [int(record["do_nothing_steps"]) for record in tier_records]
             lines.append(
                 f"| `{task_id}` | `{benchmark_tier}` | `{mean(scores):.6f}` | `{mean(lengths):.2f}` | `{mean(wall_times):.2f}` | `{mean(do_nothing):.2f}` |"

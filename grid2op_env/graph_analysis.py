@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 from typing import Any, Sequence
 
-import networkx as nx0
+import networkx as nx
 import numpy as np
 
 

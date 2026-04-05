@@ -79,7 +79,6 @@ BENCHMARK_TIERS: Dict[TaskId, List[str]] = {
     "cascade_prevent": [
         "cascade_prevent_easy",
         "cascade_prevent_medium",
-        "cascade_prevent_hard",
         "cascade_prevent_extreme",
     ],
     "multi_stage_cascade": ["multi_stage_cascade_expert"],

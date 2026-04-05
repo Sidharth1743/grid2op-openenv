@@ -463,7 +463,6 @@ def test_benchmark_tiers_are_declared_for_each_task():
     assert benchmark_tiers_for_task("cascade_prevent") == [
         "cascade_prevent_easy",
         "cascade_prevent_medium",
-        "cascade_prevent_hard",
         "cascade_prevent_extreme",
     ]
     assert benchmark_tiers_for_task("multi_stage_cascade") == [
