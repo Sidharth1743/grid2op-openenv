@@ -1,380 +1,233 @@
-# Task 3: `cascade_prevent` - Cascading Failure Prevention
+# Task 3: `cascade_prevent`
 
 ## Overview
 
-Task 3 (`cascade_prevent`) is the third task in the Grid2Op environment. It simulates an **active cascading failure scenario** where the grid is mid-collapse - multiple lines are already disconnected, load is elevated, and remaining lines are actively approaching their thermal limits. Unlike Task 2 (N-1) where the grid is stable, Task 3 requires the agent to **prevent the cascade from propagating**.
+`cascade_prevent` is the first task in the suite where the grid is no longer merely stressed or degraded. It is already moving toward a cascade.
 
-This task is based on research from the **Multi-Stage Cascading Failure (MSCF)** paper, which emphasizes that cascade prevention requires understanding individual line countdowns (`timestep_overflow`), not just global max_rho.
+At reset:
 
----
+- one or two lines are disconnected
+- demand is scaled up
+- some remaining lines are already close to or above their limits
 
-## 1. Task Definition
+The agent has **30 steps** to stop the situation from turning into automatic line trips and a broader collapse.
 
-From `tasks.py:44-52`:
+In plain language:
 
-```python
-"cascade_prevent": TaskSpec(
-    task_id="cascade_prevent",
-    difficulty="hard",
-    description=(
-        "Two lines are disconnected and load is increased by 15%. Prevent a "
-        "cascade within 30 steps before overloads trigger more trips."
-    ),
-    max_steps=30,
-),
+- Task 2 is “keep a damaged grid stable”
+- Task 3 is “stop the damage from spreading”
+
+## 1. How Reset Works
+
+Task 3 starts from a fresh reset, then injects both topology damage and extra load.
+
+The reset logic in [server/tasks.py](/home/sidharth/Desktop/grid2op-openenv/server/tasks.py) does this:
+
+1. reset the base Grid2Op environment
+2. choose a fault profile from curriculum or benchmark mode
+3. multiply `load_p` by a load scale
+4. reset again with:
+   - selected lines disconnected
+   - the scaled load injection applied
+
+### Curriculum profiles
+
+- episodes `1-3`: one line down, `+5%` load
+- episodes `4-6`: one line down, `+10%` load
+- episodes `7-9`: two lines down, `+10%` load
+- episodes `10+`: two lines down, `+15%` load
+
+### Benchmark profiles
+
+- `cascade_prevent_easy`: one line down, `+5%`
+- `cascade_prevent_medium`: one line down, `+10%`
+- `cascade_prevent_hard`: two lines down, `+10%`
+- `cascade_prevent_extreme`: two lines down, `+15%`
+
+### Faulted line pairs
+
+The current reset logic chooses from a small set of predefined fault pairs:
+
+- `(0, 8)`
+- `(0, 7)`
+- `(0, 3)`
+
+So Task 3 is not random chaos. It is a calibrated family of difficult but reproducible cascading-risk states.
+
+## 2. Why `timestep_overflow` Matters
+
+Task 3 is built around one Grid2Op concept:
+
+```text
+timestep_overflow[line_id]
 ```
 
-**Key Characteristics:**
-- Difficulty: Hard
-- Max steps: 30
-- Goal: Prevent cascade propagation
+This is the number of consecutive steps that a line has remained overloaded.
 
----
+That makes Task 3 different from a simple “reduce max_rho” problem.
 
-## 2. Reset Phase
+Example:
 
-From `tasks.py:509-548`:
+- a line at `rho = 0.98` with overflow `0` is stressed but not immediately dying
+- a line at `rho = 1.03` with overflow `2` is urgent, because it may trip very soon
 
-### Scenario Injection
+So in Task 3, urgency is line-specific and time-sensitive.
 
-```python
-def _reset_cascade_prevent(env, seed, attempt, difficulty_level, scenario_mode, benchmark_tier):
-    base_obs = env.reset(seed=seed)
-    
-    # Get profile based on mode (curriculum or benchmark)
-    if scenario_mode == "benchmark":
-        stage, faulted_lines, load_scale = _cascade_benchmark_profile(benchmark_tier, seed)
-    else:
-        stage, faulted_lines, load_scale = _cascade_profile(difficulty_level, seed)
-    
-    # Increase load by the configured percentage
-    load_p = [float(v) for v in (base_obs.load_p * load_scale).astype(float).tolist()]
-    
-    # Disconnect faulted lines
-    obs = env.reset(
-        seed=seed,
-        options={
-            "init state": {
-                "set_line_status": [(line_id, -1) for line_id in faulted_lines],
-                "injection": {"load_p": load_p},
-            }
-        },
-    )
+The planner is explicitly told to prioritize active countdowns over small improvements in global line loading.
+
+## 3. What the Agent Is Trying to Do
+
+The agent is trying to:
+
+1. prevent automatic line trips
+2. bring overloaded lines back under control
+3. keep the grid stable long enough to finish the 30-step horizon
+
+This is a triage problem.
+
+The best action is not always the one that gives the lowest immediate `max_rho`. The best action is often the one that prevents the next trip.
+
+## 4. What the Agent Sees
+
+Task 3 uses the standard observation fields:
+
+- `rho`
+- `gen_p`
+- `load_p`
+- `line_status`
+- `timestep_overflow`
+- `sensitivity_guidance`
+
+The planner prompt in [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py) adds Task 3-specific emphasis:
+
+- lines with non-zero overflow are listed explicitly
+- candidates are expected to focus on the most urgent countdowns
+- the model is told that a line with `overflow=2` matters more than a merely high `rho` with `overflow=0`
+
+This is the core behavioral difference from Task 2.
+
+## 5. Reward Function
+
+Task 3 uses a reward in [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py) that directly reflects cascade urgency.
+
+### A. Auto-trip signal
+
+Each step gets:
+
+```text
++0.3 if no automatic trip happened
+-2.5 if an automatic trip happened
 ```
 
-### Difficulty Profiles
+This is the main control objective.
 
-#### Curriculum Mode (`tasks.py:302-312`):
+### B. Overflow urgency penalty
 
-```python
-def _cascade_profile(difficulty_level: int | None, seed: int | None) -> tuple[str, list[int], float]:
-    episode = _curriculum_episode(difficulty_level)
-    pair_index = ((episode - 1) + (0 if seed is None else int(seed))) % len(CASCADE_LINE_PAIRS)
-    selected_pair = list(CASCADE_LINE_PAIRS[pair_index])
-    
-    if episode <= 3:
-        return "one_line_5pct", [selected_pair[0]], 1.05      # 1 line, +5%
-    if episode <= 6:
-        return "one_line_10pct", [selected_pair[0]], 1.10    # 1 line, +10%
-    if episode <= 9:
-        return "two_lines_10pct", selected_pair, 1.10         # 2 lines, +10%
-    return "two_lines_15pct", selected_pair, 1.15            # 2 lines, +15%
+The reward penalizes active overload countdowns quadratically:
+
+```text
+-0.05 × Σ overflow²
 ```
 
-#### Benchmark Mode (`tasks.py:315-326`):
+This is important:
 
-```python
-def _cascade_benchmark_profile(benchmark_tier: str | None, seed: int | None) -> tuple[str, list[int], float]:
-    pair_index = 0 if seed is None else int(seed) % len(CASCADE_LINE_PAIRS)
-    selected_pair = list(CASCADE_LINE_PAIRS[pair_index])
-    
-    if benchmark_tier == "cascade_prevent_easy":
-        return "benchmark_easy", [selected_pair[0]], 1.05
-    if benchmark_tier == "cascade_prevent_medium":
-        return "benchmark_medium", [selected_pair[0]], 1.10
-    if benchmark_tier == "cascade_prevent_hard":
-        return "benchmark_hard", selected_pair, 1.10
-    if benchmark_tier == "cascade_prevent_extreme":
-        return "benchmark_extreme", selected_pair, 1.15
+- overflow `1` is bad
+- overflow `2` is much worse
+- the penalty grows faster as the line gets closer to tripping
+
+### C. Thermal margin signal
+
+The reward also includes:
+
+```text
++0.1 × mean(clip(1 - rho, -1, 1))
 ```
 
-### Line Pairs
+This pushes the agent toward healthier margins overall.
 
-From `tasks.py:65-69`:
+### D. Terminal terms
 
-```python
-CASCADE_LINE_PAIRS: List[tuple[int, int]] = [
-    (0, 8),
-    (0, 7),
-    (0, 3),
-]
+- convergence failure or early collapse: `-12.0`
+- if the full horizon is reached: a survival bonus based on how many auto-trips occurred
+
+The survival bonus shrinks as trips accumulate, so the task rewards true containment rather than merely surviving the aftermath.
+
+## 6. Grading
+
+The grader in [server/graders.py](/home/sidharth/Desktop/grid2op-openenv/server/graders.py) measures three things.
+
+### A. Cascade containment: 50%
+
+How many of the 30 steps avoided auto-trips?
+
+```text
+steps_without_auto_trip / 30
 ```
 
-These are the possible combinations of lines that will be disconnected at reset.
+This is the largest part of the score because it reflects the task’s main purpose.
 
-### Difficulty Progression Summary
+### B. Thermal stability: 30%
 
-| Curriculum Episode | Benchmark Tier | Lines Disconnected | Load Increase |
-|--------------------|----------------|--------------------|----------------|
-| 1-3 | easy | 1 line | +5% |
-| 4-6 | medium | 1 line | +10% |
-| 7-9 | hard | 2 lines | +10% |
-| 10+ | extreme | 2 lines | +15% |
+Among steps with no auto-trip, how many had all lines below `100%`?
 
----
+This distinguishes “barely hanging on” from genuinely stable control.
 
-## 3. The Cascade Mechanism
+### C. Recovery speed: 20%
 
-### What is timestep_overflow?
+After the first overloaded state appeared, how fast did the agent bring the grid back below `100%` everywhere?
 
-In Grid2Op, each transmission line has a **thermal time constant**. When a line exceeds 100% loading (rho > 1.0), Grid2Op starts counting how long it's been overloaded:
+Faster recovery gets more credit.
 
-```
-timestep_overflow[line_id] = number of consecutive steps the line has been >100%
-```
+### Final score
 
-When this counter reaches the limit (`NB_TIMESTEP_OVERFLOW_ALLOWED`), the line **trips automatically** (disconnects). This is the cascade mechanism.
+The grader combines those three components and then clamps the result to `(0.01, 0.99)` for submission safety.
 
-### Visual Example
+## 7. Planner Behavior
 
-```
-Step 1:  Line 5 at 105% → overflow[5] = 1
-Step 2:  Line 5 at 107% → overflow[5] = 2
-Step 3:  Line 5 at 110% → overflow[5] = 3
-Step 4:  Line 5 at 112% → overflow[5] = 4 (if limit is 4, line trips!)
-         ↓
-Line trips → power reroutes → other lines may now exceed 100%
-         ↓
-More lines trip → cascade continues
-```
+The planner logic for Task 3 is built around urgency.
 
-### Why Task 3 is Different from Task 2
+In [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py), the prompt tells the model:
 
-| Aspect | Task 2 (n_minus_1) | Task 3 (cascade_prevent) |
-|--------|-------------------|-------------------------|
-| Grid state | Stable, degraded | Unstable, actively collapsing |
-| Key metric | max_rho trending | timestep_overflow countdowns |
-| Agent action | Find new stable point | Prevent lines from reaching trip threshold |
-| Failure mode | Gradual deterioration | Sudden cascade at specific steps |
-| Urgency | Methodical | Immediate - lines trip if not acted upon |
+- prioritize lines with active overflow countdowns
+- stop automatic trips first
+- improve overall thermal margin second
 
----
+This matters because a strategy that only minimizes `max_rho` can still fail if it ignores the line that is about to trip next.
 
-## 4. Reward Function
+## 8. Typical Episode Flow
 
-From `grid_environment.py:611-628`:
+A strong Task 3 episode usually looks like this:
 
-```python
-elif self._task_id == "cascade_prevent":
-    # Component 1: Cascade prevention bonus
-    if not auto_trip_detected:
-        reward += 0.3
-    else:
-        reward -= 2.5
-    
-    # Component 2: Overflow urgency penalty (quadratic)
-    reward -= 0.05 * sum(int(value) ** 2 for value in observation.timestep_overflow)
-    
-    # Component 3: Thermal margin signal
-    clipped_margins = [max(-1.0, min(1.0, 1.0 - float(rho))) for rho in observation.rho]
-    thermal_margin = (sum(clipped_margins) / len(clipped_margins)) if clipped_margins else 0.0
-    reward += 0.1 * thermal_margin
-    
-    # Terminal signals
-    if observation.metadata.get("convergence_failed"):
-        reward -= 12.0
-    elif done and not reached_time_limit:
-        reward -= 12.0
-    elif reached_time_limit:
-        auto_trips = sum(
-            1 for entry in self._state.episode_log if bool(entry.auto_trip_detected)
-        ) + (1 if auto_trip_detected else 0)
-        reward += 5.0 * max(0.0, 1.0 - (auto_trips / 5.0)) ** 2
-```
+1. start with one or two lines already out
+2. identify which remaining lines are overloaded
+3. check which lines have active overflow countdowns
+4. apply redispatch or safe topology changes to stop the most urgent line from tripping
+5. keep repeating that triage until the grid settles
+6. finish all 30 steps with as few automatic trips as possible
 
-### Reward Components Breakdown
+The correct mindset is:
 
-| Component | Formula | Purpose |
-|-----------|---------|---------|
-| **Cascade prevention** | +0.3 if no auto-trip, -2.5 if auto-trip | Primary objective - don't let lines trip |
-| **Overflow urgency** | -0.05 × Σ(overflow²) | Quadratic penalty for countdown urgency |
-| **Thermal margin** | +0.1 × mean(clip(1-ρ, -1, 1)) | Keep lines below thermal limits |
-| **Terminal - survival** | +5.0 × (1 - auto_trips/5)² | Quadratic bonus based on auto-trip count |
-| **Terminal - blackout** | -12.0 | Convergence failure or early termination |
+- not “optimize one global metric”
+- but “stabilize the most dangerous part of the network before it cascades”
 
-### Key Design Decisions
+## 9. What Makes Task 3 Difficult
 
-1. **Quadratic overflow penalty**: overflow=1 costs 0.05, overflow=2 costs 0.20, overflow=3 costs 0.45. This matches real urgency - a line at overflow=2 will trip next step unless acted upon.
+Task 3 is difficult because it combines:
 
-2. **Anti-reward-hacking terminal**: The survival bonus is reduced by auto-trip count. An agent cannot score well by "managing the aftermath" of cascades - it must prevent them.
+- structural damage from missing lines
+- increased load
+- per-line countdown pressure
+- a longer horizon with many chances for the grid to destabilize again
 
-3. **Differentiated from Task 2**: Task 2 uses linear signals (R_survive + R_overload + R_cost). Task 3 uses quadratic to model the immediate urgency of line countdowns.
+An action can help one overloaded corridor while making another one worse. That is why Task 3 is the first task that really feels like cascade management rather than simple overload relief.
 
----
+So the right mental model is:
 
-## 5. Grading
+“A few lines are already gone, several others are in danger, and every step you wait increases the chance of a chain reaction.”
 
-From `graders.py:86-121`:
+## 10. Key Files
 
-```python
-def grade_cascade_prevent(episode_log: list[EpisodeStepLog], max_steps: int = 30) -> float:
-    if not episode_log:
-        return 0.0
-    
-    # Component A: Cascade containment (50%)
-    containment_ratio = sum(1 for entry in episode_log if not entry.auto_trip_detected) / max_steps
-    
-    # Component B: Thermal stability (30%)
-    containment_steps = [entry for entry in episode_log if not entry.auto_trip_detected]
-    stability_ratio = (
-        sum(1 for entry in containment_steps if entry.all_lines_below_100) / len(containment_steps)
-        if containment_steps
-        else 0.0
-    )
-    
-    # Component C: Recovery speed (20%)
-    first_overload_step = next(
-        (entry.step for entry in episode_log if not entry.all_lines_below_100),
-        None,
-    )
-    if first_overload_step is None:
-        recovery_score = 1.0
-    else:
-        stabilize_step = next(
-            (
-                entry.step
-                for entry in episode_log
-                if entry.step >= first_overload_step and entry.all_lines_below_100
-            ),
-            None,
-        )
-        if stabilize_step is None:
-            recovery_score = 0.0
-        else:
-            recovery_score = max(0.0, 1.0 - ((stabilize_step - first_overload_step) / 10.0))
-    
-    score = (0.5 * containment_ratio) + (0.3 * stability_ratio) + (0.2 * recovery_score)
-    return round(min(1.0, max(0.0, score)), 6)
-```
-
-### Grading Components
-
-| Component | Weight | Formula | What it measures |
-|-----------|--------|---------|------------------|
-| **Cascade containment** | 50% | steps_without_auto_trip / 30 | Primary metric - how many steps had zero line trips |
-| **Thermal stability** | 30% | safe_steps / containment_steps | Among non-trip steps, what fraction had all lines <100% |
-| **Recovery speed** | 20% | max(0, 1 - (steps_to_stabilize / 10)) | How fast did the agent recover from first overload |
-
-### Grading Examples
-
-| Scenario | Containment | Stability | Recovery | Score |
-|----------|-------------|-----------|----------|-------|
-| No auto-trips, always <100% | 1.0 | 1.0 | 1.0 | 1.0 |
-| 1 auto-trip at step 15 | 0.5 | 0.5 | 0.5 | 0.5 |
-| 5 auto-trips spread out | 0.17 | 0.1 | 0.0 | 0.12 |
-| Full survival but always above 90% | 1.0 | 0.0 | 0.5 | 0.6 |
-
----
-
-## 6. Agent Strategy
-
-From `inference.py:549-562`:
-
-The prompt includes special instructions for Task 3:
-
-```python
-if task_id == "cascade_prevent":
-    prompt_parts.append(
-        "TASK RULE: In cascade_prevent, prioritize lines with active overflow countdowns. "
-        "A line with timestep_overflow=2 is more urgent than a line with high rho but overflow=0."
-    )
-```
-
-### What the LLM Should Do
-
-1. **Identify urgent lines**: Check `timestep_overflow` for each line - not just rho
-2. **Triage**: A line at overflow=2 will trip next step - act immediately
-3. **Prevent**: Use redispatch or topology changes to reduce overflow before trip
-4. **Maintain**: Keep max_rho below 1.0 to prevent new overflows starting
-5. **Survive**: Reach step 30 without cascade events
-
-### Action Types Available
-
-- **Redispatch**: Shift generation between generators to change power flow patterns
-- **Topology changes**: Disconnect lines to reroute power (risky - can cause more trips)
-- **Do nothing**: Let the grid evolve (risky if lines are near trip threshold)
-
----
-
-## 7. Latest Benchmark Results
-
-From eval `baseline_eval_20260402_080302.json`:
-
-### Overall Results
-```json
-{
-  "cascade_prevent": {
-    "score_mean": 0.798,
-    "episode_length_mean": 23.25
-  }
-}
-```
-
-### By Tier
-
-| Tier | Score | Episode Length | Notes |
-|------|-------|-----------------|-------|
-| **easy** (1 line, +5%) | **1.0** | 30 (full) | Perfect |
-| **medium** (1 line, +10%) | **1.0** | 30 (full) | Perfect |
-| **hard** (2 lines, +10%) | 0.516 | 13.8 | Struggling |
-| **extreme** (2 lines, +15%) | 0.677 | 19.2 | Challenging |
-
-### Key Observations
-
-1. **Easy/Medium tiers are achievable**: Full survival, score 1.0
-2. **Hard/Extreme tiers are genuinely harder**: Lower scores reflect actual difficulty
-3. **No cascading failures**: Agent avoids causing auto-trips
-4. **Cannot fully stabilize**: max_rho stays at 0.88-0.90 in extreme tier
-5. **Avoids dangerous actions**: Doesn't disconnect bridge lines that would cause blackout
-
----
-
-## 8. Unique Distinction from Other Tasks
-
-| Dimension | Task 1 (single_fault) | Task 2 (n_minus_1) | Task 3 (cascade_prevent) |
-|-----------|----------------------|-------------------|-------------------------|
-| **Faults at reset** | 0 (stress only) | 1 line | 1-2 lines |
-| **Load** | baseline | baseline | +5% to +15% |
-| **Max steps** | 10 | 20 | 30 |
-| **Goal** | Fix max_rho < 80% | Survive 20 steps | Stop cascade propagation |
-| **Key metric** | max_rho | survival | timestep_overflow |
-| **Urgency** | None | None | Immediate (countdowns) |
-| **Reward shape** | Quadratic (1-ρ²) | Linear (RL2Grid) | Quadratic (overflow²) |
-| **Agent mindset** | Fix the problem | Keep it stable | Prevent the domino chain |
-
----
-
-## 9. Files Reference
-
-| File | Purpose |
-|------|---------|
-| `tasks.py:44-52` | Task definition |
-| `tasks.py:65-69` | Line pairs for cascade scenarios |
-| `tasks.py:302-326` | Curriculum and benchmark profiles |
-| `tasks.py:509-548` | Reset function |
-| `grid_environment.py:611-628` | Reward function |
-| `graders.py:86-121` | Grading function |
-| `inference.py:549-562` | LLM prompt |
-
----
-
-## 10. Research Foundation
-
-The task design is based on insights from power grid cascading failure literature:
-
-1. **MSCF Paper**: Stages are interdependent - solving one stage may make the next unrecoverable
-2. **L2RPN Competition**: Winning agents use overflow countdowns to prioritize urgent actions
-3. **ICLR 2021 Winner**: Two-threshold system (act when rho >= 0.9)
-4. **Quadratic Urgency**: Lines at overflow=2 are 4x more urgent than overflow=1 - this matches real thermal dynamics
-
-The key insight: Task 3 tests **reactive speed under time pressure**, not just optimal steady-state operation.
+- [server/tasks.py](/home/sidharth/Desktop/grid2op-openenv/server/tasks.py)
+- [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py)
+- [server/graders.py](/home/sidharth/Desktop/grid2op-openenv/server/graders.py)
+- [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)

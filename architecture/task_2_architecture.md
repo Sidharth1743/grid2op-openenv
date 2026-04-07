@@ -1,347 +1,267 @@
-# Task 2: `n_minus_1` - N-1 Contingency Management
+# Task 2: `n_minus_1`
 
 ## Overview
 
-Task 2 (`n_minus_1`) simulates an **N-1 contingency** - one transmission line has failed and the grid must operate in a degraded topology for 20 steps without blacking out. This task is based on the **RL2Grid paper** and **L2RPN winning agent heuristics**.
+`n_minus_1` is the standard degraded-grid task in this environment.
 
-Key difference from Task 1:
-- **Task 1**: One line is stressed but topology is intact - "fix this line"
-- **Task 2**: One line is already GONE - "operate safely in degraded topology"
+The name comes from power-systems practice: if a network has `N` important components, an “N-1” event means one of them has failed and the system must continue operating safely anyway.
 
----
+In this implementation:
 
-## 1. Reset Phase
+- line `0` is disconnected at reset
+- the rest of the grid stays online
+- the agent has **20 steps** to keep the network stable
+- the agent should reconnect the missing line when that becomes safe
 
-```python
-# tasks.py:566-602 (via _reset_n_minus_1)
-def _reset_n_minus_1(env, seed, difficulty_level, scenario_mode, benchmark_tier):
-    obs = env.reset(
-        seed=seed,
-        options={"init state": {"set_line_status": [(0, -1)]}},
-    )
-    return obs, {
-        "faulted_lines": [0],
-        "curriculum_stage": "fixed_n_minus_1",
-        "scenario_mode": scenario_mode,
-        "benchmark_tier": benchmark_tier or "n_minus_1_fixed",
-        ...
-    }
-```
+In plain language:
 
-**What happens:**
-- Line 0 is **disconnected** at reset (status = -1)
-- No warmup search (unlike Task 1)
-- Straight reset with fault already applied
+- Task 1 asks “can you cool down one stressed intact grid?”
+- Task 2 asks “can you operate safely after a real line outage?”
 
-**Initial state:**
-```
-┌─────────────────────────────────────┐
-│  GRID - STEP 0 (after reset)        │
-├─────────────────────────────────────┤
-│                                     │
-│    LINE 0: DISCONNECTED ❌         │
-│    (was carrying ~15% of power)     │
-│                                     │
-│    Other 19 lines: connected        │
-│    max_rho: ~0.75-0.90              │
-│                                     │
-│  TASK: Survive 20 steps             │
-│  GOAL: Don't black out              │
-└─────────────────────────────────────┘
-```
+## 1. How Reset Works
 
----
+Task 2 does not use a warmup search.
 
-## 2. Two-Phase Structure
-
-Based on how grid operators actually work:
-
-### Phase 1: Emergency Response (Steps 1-5)
-- The line just tripped, remaining lines may be above 80%
-- Agent must take corrective actions (topology/redispatch)
-- Target: get all lines below `ρ_danger = 0.92`
-
-### Phase 2: Sustained Secure Operation (Steps 6-20)
-- Emergency addressed, now maintain safe operation
-- Agent should reconnect faulted line when cooldown expires
-- Maintain N-1 security (can withstand another line trip)
-
----
-
-## 3. Reward Function (RL2Grid-inspired)
-
-From `grid_environment.py:598-609`:
+The reset logic in [server/tasks.py](/home/sidharth/Desktop/grid2op-openenv/server/tasks.py) simply resets the environment with one fixed line already disconnected:
 
 ```python
-elif self._task_id == "n_minus_1":
-    # Component 1: Survival signal (+1.0 per step)
-    r_survive = 1.0
-    
-    # Component 2: Loading margin quality
-    clipped_margins = [max(-1.0, min(1.0, 1.0 - float(rho))) for rho in observation.rho]
-    r_overload = sum(clipped_margins) / len(clipped_margins)
-    
-    # Component 3: Redispatch cost (from _n_minus_1_redispatch_cost)
-    r_cost = -self._n_minus_1_redispatch_cost(action)
-    
-    # Combined reward
-    reward += (0.3 * r_survive) + (0.6 * r_overload) + (0.1 * r_cost)
-    
-    # Reconnection bonus (+2.0 if safe)
-    if reconnect_successful and self._reconnection_within_margin(previous_observation=self._last_obs, observation=observation):
-        reward += 2.0
-    
-    # Terminal rewards
-    if reached_time_limit and not observation.metadata.get("convergence_failed"):
-        reward += 10.0 * ((self._state.step_count / max(1, self._max_steps)) ** 2)
-    elif done and not reached_time_limit:
-        reward -= 15.0  # blackout penalty
+options={"init state": {"set_line_status": [(0, -1)]}}
 ```
 
-### Components
+That means:
 
-| Component | Formula | Weight | Purpose |
-|-----------|---------|--------|---------|
-| `R_survive` | +1.0 per step | 0.3 | Constant survival signal |
-| `R_overload` | (1/n) × Σ clip(1-ρ, -1, 1) | 0.6 | Loading margin quality |
-| `R_cost` | -0.05 × Σ|ΔMW|/ramp | 0.1 | Economic cost of redispatch |
-| `R_reconnect` | +2.0 if safe reconnection | - | Heuristic from winning agents |
-| Terminal | +10×(s/m)² / -15 | - | Quadratic survival / blackout |
+- line `0` starts out of service
+- the benchmark tier is fixed as `n_minus_1_fixed`
+- the starting problem is structural, not just a high-loading snapshot
 
-### Reconnection Detection & Validation
+The returned metadata includes:
 
-From `grid_environment.py:853-869` (`_detect_successful_reconnection`):
-```python
-def _detect_successful_reconnection(previous_observation, observation, action):
-    # Check if any requested reconnection actually succeeded
-    requested_reconnects = {line_id for line_id, status in action.line_set.items() if status == 1}
-    for idx, (before, after) in enumerate(zip(previous_observation.line_status, observation.line_status)):
-        if not before and after and idx in requested_reconnects:
-            return True
-    return False
+- `faulted_lines = [0]`
+- `curriculum_stage = "fixed_n_minus_1"`
+- `scenario_mode`
+- `benchmark_tier`
+
+## 2. What the Agent Is Trying to Do
+
+The agent has three jobs at once:
+
+1. survive the immediate disturbance
+2. keep the remaining network in a safe operating region
+3. reconnect the missing line when that is allowed and safe
+
+This is why the planner treats the task in two phases:
+
+### Phase 1: Emergency window
+
+The first five steps are treated as “clear the danger quickly.”
+
+The key target is:
+
+```text
+max_rho < 0.92
 ```
 
-From `grid_environment.py:728-737` (`_reconnection_within_margin`):
-```python
-def _reconnection_within_margin(previous_observation, observation):
-    # Ensure reconnection doesn't worsen max_rho by more than 10%
-    previous_max = max(previous_observation.rho)
-    current_max = max(observation.rho)
-    return current_max <= previous_max + 0.1
+If the grid is above that, the planner should prefer active control over passive waiting.
+
+### Phase 2: Sustained secure operation
+
+After the emergency is cleared, the goal shifts to:
+
+- keep the grid under control for the rest of the 20-step horizon
+- spend as many steps as possible with `max_rho < 0.90`
+- reconnect line `0` when cooldown allows and simulation shows it is safe
+
+## 3. What the Agent Sees
+
+Task 2 uses the same typed observation fields as the other tasks:
+
+- `rho`
+- `gen_p`
+- `load_p`
+- `line_status`
+- `timestep_overflow`
+- `sensitivity_guidance`
+
+In addition, the planner gets useful metadata through `planning_context`:
+
+- `n1_security_score`
+- `bridge_lines`
+- graph centrality and corridor information
+- redispatchable generator bounds
+
+That matters because Task 2 is not just about “lower one number.” The agent needs to understand how the missing line changes the structure of the network.
+
+## 4. Reward Function
+
+Task 2 uses a three-part reward in [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py).
+
+### A. Survival signal
+
+Every step starts with:
+
+```text
+R_survive = +1.0
 ```
 
-### Components
+This keeps the reward dense and gives the agent constant credit for staying alive.
 
-| Component | Formula | Weight | Purpose |
-|-----------|---------|--------|---------|
-| `R_survive` | +1.0 per step | 0.3 | Constant survival signal |
-| `R_overload` | (1/n) × Σ clip(1-ρ, -1, 1) | 0.6 | Loading margin quality |
-| `R_cost` | -0.05 × Σ\|ΔMW\|/ramp | 0.1 | Economic cost of redispatch |
-| `R_reconnect` | +2.0 if safe reconnection | - | Heuristic from winning agents |
-| Terminal | +10×(s/m)² / -15 | - | Quadratic survival / blackout |
+### B. Loading quality
 
-### Reconnection Bonus Logic
+The reward also measures how healthy the line loadings are:
 
-```python
-# grid_environment.py:689-698
-def _reconnection_within_margin(self, previous_observation, observation):
-    previous_max = max(previous_observation.rho)
-    current_max = max(observation.rho)
-    return current_max <= previous_max + 0.1  # don't worsen by >10%
+```text
+R_overload = mean(clip(1 - rho, -1, 1))
 ```
 
----
+This is positive when lines are comfortably loaded and worse when lines are near or above their limits.
 
-## 4. Two-Threshold Framing (ICLR 2021 Winner)
+### C. Redispatch cost
 
-In the prompt, lines are categorized:
+Redispatch is useful, but not free:
 
-```
-ρ_danger = 0.92   → EMERGENCY (must act)
-ρ_safe   = 0.80   → WARNING (monitor)
-           < 0.80 → SAFE (no action needed)
+```text
+R_cost = -0.05 × Σ|ΔMW|/max_ramp
 ```
 
-This maps directly to how grid operators think.
+Large redispatch moves cost more than smaller ones.
 
----
+### Combined reward
 
-## 5. N-1 Security Score
+The final per-step combination is:
 
-Computed in `graph_analysis.py`:
-
-```python
-n1_security_score = 1.0 - (bridge_line_count / n_connected_lines)
+```text
+0.3 × R_survive + 0.6 × R_overload + 0.1 × R_cost
 ```
 
-- **1.0**: No single line trip would island the grid
-- **0.5**: Half the lines are bridges (highly vulnerable)
+### Reconnection bonus
 
-Included in prompt:
-```
-N-1 STRUCTURAL SECURITY: score=0.941; bridge_lines=[4, 11, 15]
-```
+If the agent asks to reconnect a line and that reconnection really succeeds, the reward can get:
 
----
-
-## 6. Grading (Phase-Aware)
-
-From `graders.py:58-83`:
-
-```python
-def grade_n_minus_1(episode_log: list[EpisodeStepLog], max_steps: int = 20) -> float:
-    if not episode_log:
-        return 0.0
-    
-    # Component A: Emergency response (30%)
-    emergency_clear_step = next(
-        (entry.step for entry in episode_log[:5] if float(entry.max_rho) < 0.92),
-        None
-    )
-    emergency_score = (
-        max(0.0, 1.0 - (0.2 * max(0, emergency_clear_step - 1)))
-        if emergency_clear_step is not None
-        else 0.0
-    )
-    
-    # Component B: Sustained security (50%)
-    # Phase 2: steps 6-20 (15 steps)
-    phase2_logs = [entry for entry in episode_log if entry.step >= 6]
-    security_ratio = (
-        sum(1 for entry in phase2_logs if float(entry.max_rho) < 0.90) / 15.0
-        if phase2_logs
-        else 0.0
-    )
-    
-    # Component C: Reconnection (20%)
-    # Did line 0 get reconnected at any point?
-    reconnection_score = 1.0 if any(0 not in entry.disconnected_lines for entry in episode_log) else 0.0
-    
-    # Survival gates the score
-    survival_ratio = min(max_steps, max(entry.step for entry in episode_log)) / max_steps
-    
-    # Mastery = weighted combination
-    mastery_score = (0.30 * emergency_score) + (0.50 * security_ratio) + (0.20 * reconnection_score)
-    
-    # Final: survival × mastery (no legacy override)
-    final_score = mastery_score * survival_ratio
-    return round(min(1.0, max(0.0, final_score)), 6)
+```text
++2.0
 ```
 
-| Component | Weight | What it measures |
-|-----------|--------|------------------|
-| Emergency response | 30% | Cleared within 5 steps? (0.92 threshold) |
-| Sustained security | 50% | Steps 6-20 with rho < 0.90? |
-| Reconnection | 20% | Did agent reconnect line 0? |
+But only if the reconnect is also judged safe enough:
 
-**Note**: Previously, a `legacy_survival_score` override would return 1.0 for any full-length episode regardless of mastery. This was removed to ensure honest grading - the score now properly reflects both survival AND quality of operation.
+- the line was actually restored
+- `max_rho` did not worsen by more than `0.1`
 
----
+### Terminal terms
 
-## 7. Example Episode Walkthrough
+- if the agent survives all 20 steps: quadratic survival bonus
+- if the episode ends early: `-15.0`
 
-```
-Step 1:
-  - Line 0 already disconnected
-  - max_rho = 0.957 (EMERGENCY: line 17 at 95.7%)
-  - Action: disconnect line 14 (topology action)
-  - max_rho → 0.888 ✓ (below 0.92)
-  - Reward: 0.3×1.0 + 0.6×0.89 + 0.1×0 = 0.834
+So Task 2 rewards calm, sustained secure operation much more than one flashy move.
 
-Step 2:
-  - max_rho = 0.881 (WARNING zone)
-  - Action: do_nothing
-  - Reward: 0.648
+## 5. Reconnection Logic
 
-Step 3:
-  - max_rho = 0.834
-  - Action: disconnect line 12 (protect against cascade)
-  - Reward: 0.647
+Reconnection is one of the main differences between Task 2 and the other tasks.
 
-Step 5:
-  - RECONNECT_WINDOW: line 0 cooldown expired
-  - Action: reconnect line 0 ✓
-  - Reward: +2.0 bonus (reconnection success!)
+The environment checks two things:
 
-Step 12:
-  - RECONNECT_WINDOW: line 12 cooldown expired
-  - Action: reconnect line 12 ✓
-  - Reward: +2.0 bonus again!
+### A. Did the reconnection actually happen?
 
-Step 20:
-  - max_rho = 0.815 (SAFE)
-  - reached_time_limit = True
-  - Terminal bonus: +10.0 × (20/20)² = +10.0
-  - Total score: 1.0
+The agent may request a reconnect, but the grid only gets credit if the line status truly changed from disconnected to connected.
+
+### B. Was the reconnection safe enough?
+
+The reconnect bonus is given only when the new `max_rho` is not much worse than the old one.
+
+The current rule is:
+
+```text
+current_max_rho <= previous_max_rho + 0.1
 ```
 
----
+This prevents the agent from scoring well by reconnecting recklessly.
 
-## 8. Key Design Decisions
+## 6. Planner Behavior
 
-### Why Three-Component Reward?
-- `R_survive`: Ensures agent always has positive signal for staying alive
-- `R_overload`: The L2RPN standard - encourages margin over quantity
-- `R_cost`: Economic signal - topology changes are "free", redispatch costs
+The inference path in [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py) gives Task 2 a task-specific prompt and selection policy.
 
-### Why Quadratic Terminal?
-- Linear: 18/20 = 0.9
-- Quadratic: 18/20 → 10 × 0.81 = 8.1 bonus
+The prompt tells the model:
 
-The last few steps matter more - quadratic creates stronger incentive to finish.
+- line `0` is the faulted line
+- the first five steps are an emergency phase
+- in the emergency phase, active redispatch is preferred over passive waiting
+- after cooldown, reconnect line `0` when it is safe
 
-### Why Reconnection Bonus?
-From L2RPN 2023 winning agent: "greedy reconnection module"
-- Disconnected lines should be reconnected when cooldown expires
-- Without explicit reward, agent ignores this action
+The planner also includes:
 
----
+- `EMERGENCY_LINES` with `rho >= 0.92`
+- `WARNING_LINES` with `0.80 <= rho < 0.92`
+- `RECONNECT_WINDOW_LINES`
+- `n1_security_score`
 
-## 9. Latest Evaluation Results
+This is intended to push the model toward realistic grid-operator behavior:
 
+- first stop the dangerous state
+- then maintain secure operation
+- then restore missing transfer capacity
+
+## 7. Grading
+
+The grader in [server/graders.py](/home/sidharth/Desktop/grid2op-openenv/server/graders.py) is phase-aware.
+
+### A. Emergency response: 30%
+
+Did the agent get below `0.92` within the first five steps?
+
+Faster is better.
+
+### B. Sustained security: 50%
+
+Among steps `6-20`, how many stayed below `0.90`?
+
+This is the largest part of the score because the task is about operating safely after the fault, not just surviving the first few moments.
+
+### C. Reconnection: 20%
+
+Did the agent reconnect line `0` at any point?
+
+### Final score
+
+The grader multiplies the mastery score by survival ratio:
+
+```text
+final_score = survival_ratio × mastery_score
 ```
-20260401_230222 (after grading fix):
-  n_minus_1: score_mean=0.952, score_std=0.070
-  episode_length: 20 (full survival)
-  do_nothing_steps: 9.4/20 (47%)
-  redispatch_mw: 23.5 MW total
-  
-Grading breakdown (seed 0, score 0.94):
-  survival_ratio = 20/20 = 1.0
-  emergency_score = 0.8 (cleared at step 2, not step 1)
-  security_ratio = 1.0 (all 15 phase-2 steps < 0.90)
-  reconnection_score = 1.0 (line 0 at step 1, line 12 at step 14)
-  mastery = 0.30×0.8 + 0.50×1.0 + 0.20×1.0 = 0.94
-  final = 1.0 × 0.94 = 0.94
 
-Behavior observed:
-  - Two successful reconnections (line 0 at step 1, line 12 at step 14)
-  - N-1 security maintained at 1.0 after recovery
-  - Agent learns to stay passive when safe
-  - Grading is now honest (survival × mastery, no override)
-```
+Then it clamps the result to `(0.01, 0.99)` for submission safety.
 
-**Note**: Before the grading fix, score was 1.0 due to a `legacy_survival_score` override that returned 1.0 for any full-length episode. The fix removed this override so the score properly reflects both survival AND quality of operation.
+## 8. Typical Episode Flow
 
----
+A good Task 2 episode usually looks like this:
 
-## 10. Files Reference
+1. start with line `0` disconnected
+2. identify the most stressed remaining lines
+3. use redispatch or a safe line action to reduce the emergency
+4. keep `max_rho` under control for the rest of the horizon
+5. reconnect line `0` once the grid can handle it
+6. finish all 20 steps without blackout
 
-| File | Purpose |
-|------|---------|
-| `tasks.py:115-132` | Task 2 task spec and reset dispatch |
-| `tasks.py:566-602` | `_reset_n_minus_1` - line 0 disconnection |
-| `grid_environment.py:598-609` | Three-component reward function |
-| `grid_environment.py:728-737` | `_reconnection_within_margin` - safety check |
-| `grid_environment.py:853-869` | `_detect_successful_reconnection` |
-| `graders.py:58-83` | Phase-aware grader |
-| `graph_analysis.py` | N-1 security score (bridge line analysis) |
-| `inference.py` | Prompt with two-threshold framing (EMERGENCY/WARNING/SAFE) |
+The strong behavior is not “never touch topology” or “always reconnect immediately.” The strong behavior is:
 
----
+- act quickly when the grid is in danger
+- do not make unnecessary risky changes
+- reconnect when the simulation says it is safe
 
-## 11. Literature Reference
+## 9. What Makes Task 2 Difficult
 
-- **RL2Grid** (arXiv:2212.04069): Three-component reward `R = α·R_survive + β·R_overload + η·R_cost`
-- **L2RPN 2023**: Greedy reconnection heuristic
-- **ICLR 2021 Winner**: Activate only when `ρ_max ≥ 0.9`, two-threshold system
+Task 2 is harder than Task 1 because:
+
+- one real line is already gone
+- the power flows have already been redistributed
+- the agent must think about both present stress and future reconnection
+- some actions that help the emergency can hurt the later steady state
+
+So the correct mental model is:
+
+“Operate a real grid in degraded mode after one transmission-line outage, then restore it safely.”
+
+## 10. Key Files
+
+- [server/tasks.py](/home/sidharth/Desktop/grid2op-openenv/server/tasks.py)
+- [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py)
+- [server/graders.py](/home/sidharth/Desktop/grid2op-openenv/server/graders.py)
+- [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)

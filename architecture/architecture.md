@@ -48,12 +48,12 @@ The earlier planner used a local replayed sandbox in `inference.py`. That caused
 
 ### 1. Environment Server
 
-Implemented in [grid2op_env/server/grid_environment.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/grid_environment.py).
+Implemented in [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py).
 
 Responsibilities:
 
 - owns the live Grid2Op environment instance
-- injects reset scenarios for `single_fault`, `n_minus_1`, and `cascade_prevent`
+- injects reset scenarios for all four tasks
 - shapes rewards and stores `episode_log`
 - tracks the active raw Grid2Op observation
 - registers active sessions by `episode_id`
@@ -63,7 +63,7 @@ Responsibilities:
 
 ### 2. FastAPI Layer
 
-Implemented in [grid2op_env/server/app.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/app.py).
+Implemented in [server/app.py](/home/sidharth/Desktop/grid2op-openenv/server/app.py).
 
 Routes:
 
@@ -78,7 +78,7 @@ Routes:
 
 ### 3. Client Layer
 
-Implemented in [grid2op_env/client.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/client.py).
+Implemented in [client.py](/home/sidharth/Desktop/grid2op-openenv/client.py).
 
 Core methods:
 
@@ -90,7 +90,7 @@ Core methods:
 
 ### 4. Planner
 
-Implemented in [grid2op_env/inference.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/inference.py).
+Implemented in [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py).
 
 Loop:
 
@@ -106,7 +106,7 @@ This is the current `think -> simulate -> act` implementation.
 
 ### 5. Graph Analysis
 
-Implemented in [grid2op_env/graph_analysis.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/graph_analysis.py).
+Implemented in [graph_analysis.py](/home/sidharth/Desktop/grid2op-openenv/graph_analysis.py).
 
 Uses:
 
@@ -129,14 +129,14 @@ This graph intelligence is computed on the live server observation and returned 
 
 ## Task System
 
-Implemented in [grid2op_env/server/tasks.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/tasks.py).
+Implemented in [server/tasks.py](/home/sidharth/Desktop/grid2op-openenv/server/tasks.py).
 
 Tasks:
 
-- `single_fault` - See [task_1_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_1_architecture.md) for detailed walkthrough
-- `n_minus_1` - See [task_2_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_2_architecture.md) for N-1 contingency management
-- `cascade_prevent` - See [task_3_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_3_architecture.md) for cascade prevention
-- `multi_stage_cascade` - See [task_4_architecture.md](/home/sidharth/Desktop/Openenv_modules/architecture/task_4_architecture.md) for multi-stage cascade management
+- `single_fault` - See [task_1_architecture.md](/home/sidharth/Desktop/grid2op-openenv/architecture/task_1_architecture.md) for the detailed walkthrough
+- `n_minus_1` - See [task_2_architecture.md](/home/sidharth/Desktop/grid2op-openenv/architecture/task_2_architecture.md) for N-1 contingency management
+- `cascade_prevent` - See [task_3_architecture.md](/home/sidharth/Desktop/grid2op-openenv/architecture/task_3_architecture.md) for cascade prevention
+- `multi_stage_cascade` - See [task_4_architecture.md](/home/sidharth/Desktop/grid2op-openenv/architecture/task_4_architecture.md) for multi-stage cascade management
 
 Curriculum:
 
@@ -144,6 +144,9 @@ Curriculum:
   - episodes `1-3`: mild
   - episodes `4-6`: moderate
   - episodes `7+`: severe
+  - reset searches one chronic until `max_rho` falls inside the target band
+  - benchmark tiers use calibrated achievable ranges (`0.82-0.93`)
+  - fallback uses the closest stable state with `max_rho >= 0.80`
 - `cascade_prevent`
   - episodes `1-3`: one line, `+5%`
   - episodes `4-6`: one line, `+10%`
@@ -151,7 +154,7 @@ Curriculum:
   - episodes `10+`: two lines, `+15%`
 - `multi_stage_cascade` (Task 4)
   - 3 lines disconnected at reset
-  - +15% load increase
+  - +20% load increase
   - Three stages: 10 steps each
   - Overflow window: 2 (faster cascades)
   - Do-nothing probe: must survive 5 steps
@@ -160,8 +163,8 @@ Curriculum:
 
 Implemented in:
 
-- [grid2op_env/server/grid_environment.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/grid_environment.py)
-- [grid2op_env/server/graders.py](/home/sidharth/Desktop/Openenv_modules/grid2op_env/server/graders.py)
+- [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py)
+- [server/graders.py](/home/sidharth/Desktop/grid2op-openenv/server/graders.py)
 
 Reward shaping is task-specific. Grading is deterministic.
 
@@ -173,26 +176,33 @@ Current verified properties:
 - local replay mirror is no longer used by the active planner
 - `single_fault`, `n_minus_1`, `cascade_prevent`, and `multi_stage_cascade` all run through the same live-session simulation path
 - unit tests pass for the server-side simulation and planning context path
-- benchmark ranges corrected to be mathematically achievable (tasks.py lines 248-255)
-- redispatch penalty implemented (grid_environment.py line 58)
+- benchmark ranges corrected to be mathematically achievable
+- redispatch penalty implemented for `single_fault`
+- `single_fault` planner now uses redispatch-only control: topology edits are rejected for this task
+- `single_fault` severe benchmark uses a `0.90` success threshold; other variants use `0.80`
 - survival-focused grading implemented (graders.py)
-- **Task 2 (n_minus_1) fully redesigned** per RL2Grid paper:
-  - three-component reward (0.3×survive + 0.6×overload + 0.1×cost)
-  - reconnection bonus (+2.0) implemented
-  - phase-aware grader (emergency 30% + security 50% + reconnection 20%)
-  - N-1 security score in prompt (bridge line analysis)
-  - two-threshold framing (EMERGENCY/WARNING/SAFE)
-  - **Grading fix**: score = survival_ratio × mastery_score (no legacy override)
-  - latest eval: score=0.952 (honest grading, was 1.0 with override)
-- **Task 4 (multi_stage_cascade) added**:
-  - 3 lines disconnected at reset
-  - +15% load increase
-  - Three-stage cascade structure (10 steps each)
-  - Candidate filtering prevents grid collapse actions
-  - Island availability assessment at stage boundaries
-  - Latest eval: score=0.929 (31x improvement from 0.027 with candidate filtering)
+- **Task 2 (`n_minus_1`) is modeled as a fixed single-line contingency**:
+  - line `0` starts disconnected
+  - reward uses survival, loading quality, and redispatch cost
+  - safe reconnection can earn a `+2.0` bonus
+  - grading uses emergency handling, sustained security, and reconnection
+  - prompt context includes bridge-line / N-1 security information
+  - latest eval: score=0.952
+- **Task 3 (`cascade_prevent`) is modeled as an active cascade-prevention problem**:
+  - reset disconnects one or two lines and increases load by `5-15%`
+  - `timestep_overflow` is the primary urgency signal
+  - reward penalizes countdown growth quadratically and punishes auto-trips
+  - grading measures containment, thermal stability, and recovery speed
+  - latest eval: score=0.798
+- **Task 4 (`multi_stage_cascade`) is modeled as staged load-preservation under unavoidable cascade pressure**:
+  - reset disconnects three lines and increases load by `20%`
+  - only chronics that survive a 5-step do-nothing probe are used
+  - the episode is divided into three explicit 10-step stages
+  - island viability is assessed from connected components, local load, and local generation capacity
+  - planning favors redispatch and survivable island structure over short-term cosmetic improvements
+  - latest eval: score=0.929
 
 Current benchmark caveat:
 
-- the latest `cascade_prevent = 1.0` result is valid for the evaluated curriculum slice, but that slice only covered the easier early curriculum stages in the 5-seed run
-- `single_fault` still has some fallback states that are easier than the nominal target range
+- `cascade_prevent` score can vary sharply between benchmark tiers because the extreme tier starts with two missing lines and active overload countdown pressure
+- `single_fault` can still fall back to the closest stable high-loading state when an exact benchmark-band match is unavailable

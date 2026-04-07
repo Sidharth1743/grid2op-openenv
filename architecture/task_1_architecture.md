@@ -1,613 +1,250 @@
-# Task 1: `single_fault` - Complete Architecture & Walkthrough
+# Task 1: `single_fault`
 
 ## Overview
 
-`single_fault` is the first and most important task in the Grid2Op environment. It simulates a pre-overload power grid scenario where the agent must stabilize the grid within 10 timesteps by bringing all transmission lines below a target threshold (80% for easy/curriculum, 82-93% for benchmark tiers).
+`single_fault` is the simplest task operationally, but it is the cleanest way to understand how this environment works.
 
----
+The grid is **not** reset into a blackout and **not** reset with a line already disconnected. Instead, the server replays one real Grid2Op time series until it finds a timestep where the grid is intact but one or more lines are already running hot. The agent then has **10 steps** to bring the whole grid back under control.
 
-## 1. BEFORE THE GAME STARTS (Reset Phase)
+In plain language:
 
-The environment performs a **warmup** phase to find a suitable starting state:
+- the network is still connected
+- the physics are still stable
+- one line is too close to its thermal limit
+- the agent must cool the grid down quickly, mainly by redispatching generation
 
-```
-Grid2Op loads: l2rpn_case14_sandbox (14-bus power grid)
-     │
-     ├── ChronicsHandler starts at step 0
-     │
-     ▼
-Env steps forward: 0 → 1 → 2 → ... → N
-     │
-     ▼
-At each step, calculate: max_rho = max(all line loadings)
-     │
-     ▼
-Find the step where: target_min ≤ max_rho ≤ target_max
-     │
-     │  Difficulty levels (BENCHMARK - FIXED in tasks.py:297-304):
-     │  - easy: 0.82-0.85 (was impossible 0.90-0.94)
-     │  - moderate: 0.86-0.89 (was impossible 0.94-0.97)
-     │  - severe: 0.90-0.93 (was impossible 0.96-0.99)
-     │
-     ▼
-STOP at that step - this is your starting state
-     │
-     ▼
-Return observation + scenario metadata
-```
+This task teaches “relieve overload before it becomes a failure.”
 
-**Scenario Metadata** (returned to track what was used):
-- `curriculum_episode`: Episode number in curriculum
-- `curriculum_stage`: "mild", "moderate", "severe", or benchmark equivalent
-- `scenario_mode`: "curriculum" or "benchmark"
-- `benchmark_tier`: Which benchmark tier if in benchmark mode
-- `time_series_id`: Which chronic was used
-- `target_rho_range`: [min, max] that was searched for
-- `warmup_steps`: How many steps were taken to find the state
-- `target_matched`: True if exact target found, False if fallback used
-- `scenario`: "high_loading"
+## 1. How Reset Works
 
----
+Task 1 uses a **warmup search**, not a direct fault injection.
 
-## 2. GRID PHYSICS: What Is `l2rpn_case14_sandbox`?
+The reset logic in [server/tasks.py](/home/sidharth/Desktop/grid2op-openenv/server/tasks.py) does this:
 
-### The Power Grid
+1. pick a deterministic time series id
+2. reset the Grid2Op environment on that time series
+3. step forward with do-nothing actions
+4. measure `max_rho = max(obs.rho)` at each warmup step
+5. stop when `max_rho` enters the target range for the requested difficulty
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    14-BUS POWER GRID                                  │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│    GEN1 (100 MW)                                                    │
-│        │                                                             │
-│        ╰── LINE 0 (65%) ── BUS 1 ── LINE 1 (70%) ── BUS 2 ──...    │
-│                                                                      │
-│    GEN2 (80 MW)                                                     │
-│        │                                                             │
-│        ╰── LINE 5 (87%) ── BUS 3 ── LINE 6 (55%) ── BUS 5 ──...    │
-│                              ↑                                       │
-│                              │ PROBLEM LINE                          │
-│    GEN3 (60 MW)                                                     │
-│        │                                                             │
-│        ╰── LINE 12 (45%) ── BUS 6 ── LINE 13 (60%) ── BUS 9        │
-│                                                                      │
-│    GEN4 (45 MW)                                                     │
-│    GEN5 (30 MW)                                                     │
-│                                                                      │
-├─────────────────────────────────────────────────────────────────────┤
-│  Total: 5 Generators, 20 Lines, 14 Substations, ~240 MW Load        │
-└─────────────────────────────────────────────────────────────────────┘
-```
+If the exact target range is never found, the server keeps the **closest stable** state it saw and replays that warmup exactly so the backend and the returned observation stay synchronized.
 
-### Key Properties
+### Target ranges
 
-| Property | Value | Description |
-|----------|-------|-------------|
-| `n_line` | 20 | Number of transmission lines |
-| `n_gen` | 5 | Number of generators |
-| `n_sub` | 14 | Number of substations/buses |
-| `n_load` | 11 | Number of loads (cities/factories) |
-| `gen_redispatchable` | [True, True, True, False, False] | Which generators can be moved |
+There are two modes:
 
-### What Is `rho`?
+**Curriculum mode**
 
-`rho` = **thermal loading ratio** = actual power flow / maximum capacity
+- episodes `1-3`: `0.90-0.94`
+- episodes `4-6`: `0.94-0.97`
+- episodes `7+`: `0.96-0.99`
 
-```
-rho = 0.65  → Line is at 65% of its thermal limit
-rho = 0.87  → Line is at 87% of its thermal limit (WARNING!)
-rho = 1.05  → Line is overloaded by 5% (PENALTY!)
-```
+These are intentionally aggressive and are mostly for internal progression logic.
 
----
+**Benchmark mode**
 
-## 3. STEP 0: Initial State (After Reset)
+- `single_fault_easy`: `0.82-0.85`
+- `single_fault_moderate`: `0.86-0.89`
+- `single_fault_severe`: `0.90-0.93`
 
-After the warmup finds a valid state, the agent receives this observation:
+These are the calibrated public benchmark bands.
 
-```
-┌─────────────────────────────────────────────────────┐
-│  POWER GRID - STEP 0 (Initial State)                 │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│    GEN1 ●───────────╮                               │
-│        (100 MW)     ╰─── LINE 0 ───● SUBSTATION 1  │
-│                         (65%)                       │
-│                                                     │
-│    GEN2 ●───────────╮                               │
-│        (80 MW)     ╰─── LINE 5 ───● SUBSTATION 3  │
-│                         (87%)  ← PROBLEM LINE      │
-│                                                     │
-│    GEN3 ●───────────╮                               │
-│        (60 MW)     ╰─── LINE 12 ──● SUBSTATION 5   │
-│                         (45%)                       │
-│                                                     │
-│  Load: 240 MW  |  Lines: 20  |  Gen: 5             │
-│  MAX_RHO = 0.87 (Line 5)                            │
-│  TARGET: Get ALL lines < 0.80                      │
-└─────────────────────────────────────────────────────┘
-```
+### Returned metadata
 
-### Observation JSON Structure
+Reset stores metadata such as:
+
+- `time_series_id`
+- `warmup_steps`
+- `target_rho_range`
+- `target_matched`
+- `stable_fallback_used` when applicable
+- `scenario = "high_loading"` or `"high_loading_closest_stable_match"`
+
+That metadata matters because the same warmup can be replayed later if needed.
+
+## 2. What Counts as Success
+
+Task 1 does **not** use the same threshold in every variant.
+
+The success threshold is computed in [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py):
+
+- default threshold: `0.80`
+- severe benchmark threshold: `0.90`
+
+This means:
+
+- easy benchmark, moderate benchmark, and normal curriculum runs are solved when **all lines are below `0.80`**
+- severe benchmark is solved when **all lines are below `0.90`**
+
+The episode ends early as soon as the threshold is satisfied.
+
+## 3. What the Agent Can Do
+
+Although the environment itself supports line switching and redispatch, the Task 1 planner intentionally treats this as a **redispatch-first control problem**.
+
+In [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py):
+
+- `disconnect_line` and `reconnect_line` proposals are rejected for `single_fault`
+- the prompt tells the model to use only `redispatch` or `do_nothing`
+- after simulation, the best improving candidate is selected directly
+- there is no second LLM “final choice” call for this task
+
+This is an important design choice. Task 1 is supposed to be the cleanest overload-relief problem, not a topology-exploration problem.
+
+## 4. What the Agent Sees
+
+The observation includes:
+
+- `rho`: per-line loading ratio
+- `gen_p`: generator outputs
+- `load_p`: load values
+- `line_status`
+- `timestep_overflow`
+- `sensitivity_guidance`
+
+For Task 1, `sensitivity_guidance` is especially useful. The server simulates small redispatch moves and returns the ones that reduce the current global `max_rho`.
+
+Typical guidance item:
 
 ```json
 {
-  "rho": [0.65, 0.72, 0.55, 0.81, 0.45, 0.87, 0.62, 0.50, 0.78, 0.41, 
-          0.33, 0.89, 0.45, 0.60, 0.72, 0.38, 0.55, 0.68, 0.44, 0.52],
-  "gen_p": [100.0, 80.0, 60.0, 45.0, 30.0],
-  "load_p": [45.0, 55.0, 40.0, 35.0, 30.0, 25.0, 20.0, 15.0, 10.0, 5.0, 5.0],
-  "line_status": [true, true, true, true, true, true, true, true, true, true,
-                  true, true, true, true, true, true, true, true, true, true],
-  "timestep_overflow": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-  "sensitivity_guidance": [
-    {"action_type": "redispatch", "target_id": 1, "expected_rho_change": -0.023},
-    {"action_type": "redispatch", "target_id": 0, "expected_rho_change": -0.015}
-  ],
-  "reward": 0.0,
-  "done": false
+  "action_type": "redispatch",
+  "target_id": 5,
+  "delta_mw": -15.0,
+  "expected_rho_change": -0.0214
 }
 ```
 
-### What the Agent Sees
+That means “moving generator 5 by `-15 MW` is expected to reduce the current worst line loading by about `0.0214`.”
 
-1. **Line loadings** (`rho` array): 20 values, one per line
-   - Line 5 is at 87% - ABOVE the 80% target!
-   
-2. **Generator outputs** (`gen_p` array): 5 values in MW
-   - Generators 0, 1, 2 are redispatchable (can change output)
-   - Generators 3, 4 are fixed
+## 5. Reward Function
 
-3. **Load** (`load_p` array): 11 values showing current consumption
-   - This will INCREASE each step as chronics advance
+Task 1 uses a simple shaped reward in [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py):
 
-4. **Line status**: All lines are connected (true)
+### A. Early-fix bonus
 
-5. **Sensitivity guidance**: Hints about which actions might help
-   - Redispatch generator 1 might reduce rho by 0.023
+If the agent gets every line below the success threshold, it earns:
 
----
-
-## 4. LLM REASONING (Planner Phase)
-
-The LLM receives additional context through `/planning_context`:
-
-### Graph Analysis
-```
-{
-  "bridge_lines": [5, 12],
-  "safe_to_disconnect": [3, 7, 15],
-  "parallel_groups": [[0, 1], [8, 9]],
-  "high_centrality_buses": [1, 3, 5],
-  "islanded_clusters": [],
-  "congestion_corridor": [4, 5, 6],
-  "stressed_lines": [5, 11]
-}
+```text
+1.0 / step_count
 ```
 
-### Redispatchable Generators
-```json
-{
-  "redispatchable_generators": [0, 1, 2],
-  "redispatch_generators": [
-    {
-      "gen_id": 0,
-      "p_mw": 100.0,
-      "max_ramp_up": 20.0,
-      "max_ramp_down": 15.0,
-      "allowed_delta_min": -15.0,
-      "allowed_delta_max": 20.0,
-      "allowed_deltas": [-15.0, -7.5, 0.0, 7.5, 20.0]
-    },
-    {
-      "gen_id": 1,
-      "p_mw": 80.0,
-      "max_ramp_up": 15.0,
-      "max_ramp_down": 12.0,
-      "allowed_delta_min": -12.0,
-      "allowed_delta_max": 15.0,
-      "allowed_deltas": [-12.0, -6.0, 0.0, 6.0, 15.0]
-    }
-  ]
-}
+So solving at step 1 is better than solving at step 8.
+
+### B. Safe-margin bonus
+
+Each step also gets:
+
+```text
+0.05 × max(0, 1 - max_rho)
 ```
 
-### LLM Internal Reasoning
+This encourages lower stress even before the exact success condition is met.
 
-```
-Observation analysis:
-- Line 5 at 87% - ABOVE 80% target
-- Generator 0: can shift -15 to +20 MW
-- Generator 1: can shift -12 to +15 MW
+### C. Overload penalty
 
-Strategy options:
-1. Do nothing - wait for grid to stabilize
-   → Risk: chronics increase load, rho goes UP
-   
-2. Redispatch Generator 0 (-10 MW) and Generator 1 (+10 MW)
-   → Expected: Line 5 drops to ~82%
-   → Risk: not enough, might still be above target
-   
-3. More aggressive: Gen0 (-15), Gen1 (+15)
-   → Expected: Line 5 drops to ~77%
-   → Cost: penalty = 0.01 × 30 = 0.3
+For each line above `1.0`, the reward loses:
 
-Decision: Go with option 3 - more aggressive
-Action: {"redispatch": {"0": -10.0, "1": 10.0}}
+```text
+0.2 × overloaded_line_count
 ```
 
----
+### D. Redispatch penalty
 
-## 5. STEP 1: Action Execution
+Task 1 discourages oversized generator moves:
 
-### Action JSON
-
-```json
-{
-  "line_set": {},
-  "redispatch": {"0": -10.0, "1": 10.0},
-  "do_nothing": false
-}
+```text
+0.01 × total_redispatch_mw
 ```
 
-### What This Means
+This penalty is specific to Task 1.
 
-- **Generator 0**: Reduce output by 10 MW (100 → 90 MW)
-- **Generator 1**: Increase output by 10 MW (80 → 90 MW)
-- Total generation stays the same (200 MW)
-- Power flow paths change through the network
+### E. Failure penalty
 
-### Grid Physics Computation
+If the agent reaches the 10-step limit without solving the task:
 
-```
-BEFORE action:
-  Gen0: 100 MW, Gen1: 80 MW
-  Line 5 power flow: 87% of capacity
-
-AFTER action:
-  Gen0: 90 MW (-10), Gen1: 90 MW (+10)
-  
-Power flow solver recomputes:
-  → New line impedances
-  → New power paths
-  → New line loadings
-
-Result:
-  Line 0: 65% → 60%
-  Line 5: 87% → 82%  ↓ (improved!)
-  Line 12: 45% → 48%
+```text
+-5.0
 ```
 
-### New State After Step 1
+## 6. Grading
 
-```
-┌─────────────────────────────────────────────────────┐
-│  POWER GRID - AFTER STEP 1                          │
-├─────────────────────────────────────────────────────┤
-│  Line 5: 87% → 82%  ↓                               │
-│  MAX_RHO = 0.82  (still above 0.80 target!)        │
-│  All lines < 1.0? YES (no overload)                 │
-│                                                     │
-│  Reward: 0.05 × (1-0.82) - 0.01 × 20 = 0.009 - 0.2 │
-│  Net: -0.191                                        │
-└─────────────────────────────────────────────────────┘
+The grader in [server/graders.py](/home/sidharth/Desktop/grid2op-openenv/server/graders.py) combines three ideas.
+
+### A. Survival ratio
+
+The agent gets credit for lasting through the task horizon:
+
+```text
+0.7 × (steps_survived / 10)
 ```
 
-### Reward Breakdown (Step 1)
+### B. Target bonus
 
-From `grid_environment.py:589-596`:
+If the threshold was achieved at any point:
 
-```
-# Actual implementation:
-safe_margin_bonus = 0.05 × max(0.0, 1.0 - max_rho)  # = 0.05 × 0.18 = 0.009
-overload_penalty  = 0.2 × overloaded_count          # = 0 (no lines > 1.0)
-redispatch_penalty = _action_penalty(action)         # = 0.01 × 20 = 0.2
-
-# Plus: early termination bonus if target achieved (step 1)
-# target_achieved_bonus = 1.0 / step_count = 1.0/1 = 1.0
-
-Total reward: 0.009 - 0.2 + 1.0 = 0.809 (if target achieved)
+```text
++0.5
 ```
 
----
+### C. Final-state bonus
 
-## 6. STEP 2: Chronics Advance (The Challenge)
+The last state gives extra credit:
 
-### What Are Chronics?
+- `+0.3` if final `max_rho < target_threshold`
+- `+0.15` if within `+0.05`
+- `+0.05` if within `+0.10`
 
-Chronics are **time-series data** representing the grid evolving over time:
-- Load patterns change (morning → afternoon → evening)
-- Generation schedules change
-- Each step advances time by one unit
+### D. Legacy early-success score
 
-### What Happens in Step 2
+There is also a preserved “solve early” score:
 
-```
-CHRONICS TICK FORWARD: step 2
-
-Load increases due to time progression:
-  City A (bus 1):    45 → 47 MW (+2)
-  City B (bus 3):    55 → 57 MW (+2)
-  City C (bus 5):    40 → 42 MW (+2)
-  City D (bus 7):    35 → 36 MW (+1)
-  ...and so on
-Total load increase: ~+6-8 MW
-
-Grid physics recomputes:
-  More power must flow through the network
-  → Line loadings INCREASE
-  
-  Line 5: 82% → 85%  ↑ (back up!)
-  Line 0: 60% → 63%
-  Line 12: 48% → 51%
+```text
+1.0 - 0.08 × (step - 1)
 ```
 
-### The Core Challenge
+The grader keeps the better of:
 
-```
-┌─────────────────────────────────────────────────────┐
-│  THE PROBLEM: Load Keeps Growing                     │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│  Step 1: Redispatch fixed the problem              │
-│          max_rho: 0.87 → 0.82                       │
-│                                                     │
-│  Step 2: Chronics tick forward                      │
-│          Load increases +6 MW                       │
-│          max_rho: 0.82 → 0.85 (WORSE!)              │
-│                                                     │
-│  The agent must keep up with the growing load!    │
-│                                                     │
-└─────────────────────────────────────────────────────┘
-```
+- the composite score above
+- the legacy early-success score
 
-### New State After Step 2
+Finally, the score is clamped to `(0.01, 0.99)` for submission safety.
 
-```
-┌─────────────────────────────────────────────────────┐
-│  POWER GRID - AFTER STEP 2                          │
-├─────────────────────────────────────────────────────┤
-│  Line 5: 82% → 85%  ↑ (back up!)                    │
-│  MAX_RHO = 0.85  (still above 0.80 target)         │
-│                                                     │
-│  Reward: -0.05 (max_rho went UP!)                  │
-│  Net: -0.25                                         │
-└─────────────────────────────────────────────────────┘
-```
+## 7. Typical Episode Flow
 
-### Reward Breakdown (Step 2)
+Here is the intended control loop:
 
-```
-Margin bonus:    0.05 × (1-0.85) = 0.05 × 0.15 = 0.0075
-Overload:       0 (no lines > 1.0)
-Redispatch:     0.01 × 20 = 0.2
-Delta penalty:  max_rho went UP → -0.05
-                                        ──────────────
-Total:          0.0075 - 0.2 - 0.05 = -0.2425
-```
+1. reset into a high-loading intact grid
+2. inspect the highest `rho`
+3. look at `sensitivity_guidance`
+4. propose a few redispatch candidates
+5. simulate them on the live server session
+6. execute the safest improvement
+7. stop early if every line is below the task threshold
 
----
+For Task 1, the best behavior is usually:
 
-## 7. STEP 3: More Aggressive Action
+- avoid random line cuts
+- prefer simulator-backed redispatch actions
+- reduce the worst line quickly
+- avoid oscillating giant redispatchs without improvement
 
-### LLM Sees
+## 8. What Makes Task 1 Tricky
 
-- max_rho went UP from 0.82 to 0.85
-- Need stronger intervention
-- Previous redispatch wasn't enough
+Task 1 is easy to describe, but several details matter:
 
-### LLM Decision
+- the benchmark target bands are lower than the old curriculum bands
+- severe benchmark is judged against `0.90`, not `0.80`
+- reset may return a stable fallback state if no exact target-band state exists
+- the planner is intentionally restricted to redispatch-style actions
 
-```json
-{
-  "redispatch": {"0": -15.0, "1": 15.0}
-}
-```
-(Bigger shift: -15/+15 = 30 MW total)
+So the right mental model is:
 
-### Grid Physics
+“Start from a realistic high-loading operating point, then use small, informed generation shifts to cool the grid below the task threshold before time runs out.”
 
-```
-Gen0: 90 → 75 MW (-15)
-Gen1: 90 → 105 MW (+15)
+## 9. Key Files
 
-Line 5: 85% → 77%  ↓↓ (significant improvement!)
-```
-
-### New State
-
-```
-┌─────────────────────────────────────────────────────┐
-│  POWER GRID - AFTER STEP 3                          │
-├─────────────────────────────────────────────────────┤
-│  Line 5: 85% → 77%  ↓↓ SUCCESS!                    │
-│  MAX_RHO = 0.77  (< 0.80 target!)                   │
-│  ALL LINES BELOW TARGET!                            │
-│                                                     │
-│  EPISODE ENDS HERE (done=True)                     │
-└─────────────────────────────────────────────────────┘
-```
-
-### Episode Complete
-
-When `all(rho < target)`, the episode terminates early:
-
-```python
-# From grid_environment.py line 215-218
-if self._task_id == "single_fault" and all_lines_below_target:
-    done = True
-```
-
----
-
-## 8. GRADING (Score Calculation)
-
-### Episode Log
-
-```json
-[
-  {"step": 1, "max_rho": 0.82, "all_lines_below_target": false},
-  {"step": 2, "max_rho": 0.85, "all_lines_below_target": false},
-  {"step": 3, "max_rho": 0.77, "all_lines_below_target": true}
-]
-```
-
-### Grader Calculation (from graders.py:28-55)
-
-```python
-def grade_single_fault(episode_log):
-    # 1. Survival ratio (70% weight)
-    survival_ratio = min(1.0, len(episode_log) / 10)  # 3/10 = 0.3
-    survival_score = survival_ratio * 0.7  # = 0.21
-    
-    # 2. Target achieved bonus (50%)
-    achieved_target = any(entry.all_lines_below_target or entry.all_lines_below_80 for entry in episode_log)
-    target_bonus = 0.5 if achieved_target else 0.0  # = 0.5
-    
-    # 3. Legacy success score (bonus for early completion)
-    legacy_success_score = 0.0
-    for entry in episode_log:
-        if entry.all_lines_below_target or entry.all_lines_below_80:
-            legacy_success_score = round(max(0.0, 1.0 - (0.08 * max(0, entry.step - 1))), 6)
-            break
-    
-    # 4. Final state bonus (0.3 if below target, 0.15 if within +0.05, 0.05 if within +0.10)
-    final_rho = 0.77
-    target_threshold = 0.80
-    if final_rho < target_threshold:
-        final_bonus = 0.3  # = 0.3
-    elif final_rho < target_threshold + 0.05:
-        final_bonus = 0.15
-    elif final_rho < target_threshold + 0.10:
-        final_bonus = 0.05
-    else:
-        final_bonus = 0.0
-    
-    # Total
-    score = (survival_ratio * 0.7) + target_bonus + final_bonus
-    score = max(score, legacy_success_score)  # Take max of both scoring methods
-    score = min(1.0, max(0.0, score))
-    
-    return round(score, 6)
-
-# For example: episode completes at step 3 with max_rho=0.77:
-# survival_score = (3/10) * 0.7 = 0.21
-# target_bonus = 0.5 (achieved target)
-# legacy_success_score = 1.0 - 0.08 * 2 = 0.84
-# final_bonus = 0.3 (below target)
-# 
-# score = 0.21 + 0.5 + 0.3 = 1.01 → capped at 1.0
-```
-
----
-
-## 9. Visual Flow Summary
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         TASK 1 COMPLETE FLOW                        │
-└─────────────────────────────────────────────────────────────────────┘
-
-RESET PHASE
-│
-├─► Load chronics (l2rpn_case14_sandbox)
-│
-├─► Warmup loop: step forward until max_rho in target range
-│
-├─► Found: max_rho = 0.87 at step 47
-│
-└─► Return observation to agent
-
-STEP 1
-│
-├─► Agent sees: max_rho = 0.87, Line 5 at 87%
-│
-├─► Agent thinks: "Redispatch Gen0→Gen1 by 10 MW"
-│
-├─► Execute: {"redispatch": {"0": -10.0, "1": 10.0}}
-│
-├─► Grid physics: Line 5 → 82%
-│
-├─► Reward: -0.191 (penalty for redispatch)
-│
-└─► State: max_rho = 0.82 (still > 0.80)
-
-STEP 2
-│
-├─► Chronics tick: load +6 MW
-│
-├─► Grid physics: Line 5 → 85% (load pushed it up!)
-│
-├─► Reward: -0.25 (max_rho went UP!)
-│
-└─► State: max_rho = 0.85 (still > 0.80)
-
-STEP 3
-│
-├─► Agent sees: max_rho went UP, need more!
-│
-├─► Agent thinks: "More aggressive: -15/+15 MW"
-│
-├─► Execute: {"redispatch": {"0": -15.0, "1": 15.0}}
-│
-├─► Grid physics: Line 5 → 77%  ↓↓
-│
-├─► Check: all(rho < 0.80)? YES!
-│
-├─► EPISODE DONE! (done = True)
-│
-└─► Grading: 0.21 + 0.5 + 0.3 = 1.0
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                              SCORE = 1.0                            │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 10. Difficulty Levels
-
-### Curriculum Mode (Progressive)
-
-| Episode | Stage | Target Range | Description |
-|---------|-------|--------------|-------------|
-| 1-3 | mild | 0.90-0.94 | Easy warmup |
-| 4-6 | moderate | 0.94-0.97 | Medium challenge |
-| 7+ | severe | 0.96-0.99 | Hardest |
-
-### Benchmark Mode (Fixed Tiers)
-
-| Tier | Target Range | Fixed in Code |
-|------|--------------|---------------|
-| `single_fault_easy` | 0.82-0.85 | tasks.py:299 |
-| `single_fault_moderate` | 0.86-0.89 | tasks.py:301 |
-| `single_fault_severe` | 0.90-0.93 | tasks.py:303 |
-
-**Note**: The original benchmark ranges (0.90-0.94, etc.) were mathematically impossible because generators could only reduce ~0.03-0.05 rho per step. Fixed in recent updates to 0.82-0.85, 0.86-0.89, 0.90-0.93.
-
----
-
-## 11. Key Files Reference
-
-| File | Purpose |
-|------|---------|
-| `server/tasks.py` | Scenario injection, warmup logic, benchmark profiles |
-| `server/grid_environment.py` | Environment wrapper, reward shaping, action execution |
-| `server/graders.py` | Score calculation (survival + target bonus + final bonus) |
-| `inference.py` | LLM planner with simulate-then-act loop |
-| `models.py` | Typed data classes (GridAction, GridObservation, etc.) |
-| `graph_analysis.py` | Topology analysis (bridges, stressed lines, etc.) |
-
----
-
-## 12. Why It's Challenging
-
-| Challenge | Explanation |
-|-----------|-------------|
-| **Load keeps growing** | Each chronics step adds ~5-10 MW, pushing rho back up |
-| **Limited generator ramp** | Can only shift ~30-50 MW per step |
-| **Target threshold** | Must get ALL lines (not just max) below 80% |
-| **Penalty for trying** | 0.01 × MW redispatched discourages large interventions |
-| **Time limit** | Only 10 steps to solve |
-
-The agent must find the **optimal balance**: enough redispatch to push max_rho below target, but not so much that the penalty outweighs the rewards.
+- [server/tasks.py](/home/sidharth/Desktop/grid2op-openenv/server/tasks.py)
+- [server/environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py)
+- [server/graders.py](/home/sidharth/Desktop/grid2op-openenv/server/graders.py)
+- [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)
