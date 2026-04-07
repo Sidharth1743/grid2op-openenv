@@ -27,7 +27,7 @@ from grid2op_env.models import (
 from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
 
 
-def configure_logging(level: int = logging.INFO) -> None:
+def configure_logging(level: int = logging.WARNING) -> None:
     root_logger = logging.getLogger()
     if root_logger.handlers:
         root_logger.setLevel(level)
@@ -56,11 +56,18 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 TASK_SEED_OVERRIDES: dict[TaskId, int] = {
-    "single_fault": 2,
+    "single_fault": 1,
+    "n_minus_1": 4,
     "cascade_prevent": 2,
+    "multi_stage_cascade": 4,
 }
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
-HF_ROUTER_DEFAULT_MODEL = "openai/gpt-oss-safeguard-20b:groq"
+HF_ROUTER_DEFAULT_MODEL = "openai/gpt-oss-20b:groq"
+DEFAULT_ENV_BASE_URL = "http://127.0.0.1:7860"
+DEFAULT_BENCHMARK_NAME = "grid2op_env"
+SUBMISSION_SUCCESS_SCORE_THRESHOLD = float(
+    os.getenv("SUCCESS_SCORE_THRESHOLD", "0.1")
+)
 
 
 @dataclass
@@ -94,36 +101,23 @@ class SimulationOutcome:
     raw_result: dict[str, Any]
 
 
-def _env_flag(name: str, default: bool) -> bool:
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _use_local_llm_setup() -> bool:
-    if "local_setup" in os.environ:
-        return _env_flag("local_setup", True)
-    return _env_flag("LOCAL_SETUP", True)
-
-
 def _default_model_name() -> str:
-    if _use_local_llm_setup():
-        return os.environ.get("OPENAI_MODEL", "Qwen/Qwen3.5-9B")
-    return os.environ.get("HF_ROUTER_MODEL", HF_ROUTER_DEFAULT_MODEL)
+    return os.environ.get("MODEL_NAME", HF_ROUTER_DEFAULT_MODEL)
+
+
+def _llm_api_base_url() -> str:
+    return os.environ.get("API_BASE_URL", HF_ROUTER_BASE_URL)
 
 
 def _build_llm_client() -> OpenAI:
-    if _use_local_llm_setup():
-        return OpenAI()
-    hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
+    api_key = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY")
+    if not api_key:
         raise RuntimeError(
-            "HF Router mode requires HF_TOKEN in the environment when local_setup=false."
+            "Set HF_TOKEN or API_KEY to use Hugging Face Router inference."
         )
     return OpenAI(
-        base_url=HF_ROUTER_BASE_URL,
-        api_key=hf_token,
+        base_url=_llm_api_base_url(),
+        api_key=api_key,
     )
 
 
@@ -138,15 +132,150 @@ def _chat_completion_kwargs(
         "temperature": llm_config.temperature,
         "top_p": llm_config.top_p,
         "presence_penalty": llm_config.presence_penalty,
+        "stream": False,
     }
-    if _use_local_llm_setup():
-        request_kwargs["extra_body"] = {
-            "top_k": llm_config.top_k,
-            "min_p": llm_config.min_p,
-            "repetition_penalty": llm_config.repetition_penalty,
-            "chat_template_kwargs": {"enable_thinking": llm_config.enable_thinking},
-        }
     return request_kwargs
+
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(
+    step: int,
+    action: GridAction,
+    reward: float,
+    done: bool,
+    error: str | None,
+) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    action_str = json.dumps(action.model_dump(), separators=(",", ":"), sort_keys=True)
+    print(
+        f"[STEP] step={step} action={action_str} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+def run_submission_episodes(task_ids: Sequence[TaskId] | None = None) -> dict[TaskId, float]:
+    base_url = os.environ.get("GRID2OP_BASE_URL", DEFAULT_ENV_BASE_URL)
+    benchmark_name = os.environ.get("GRID2OP_BENCHMARK", DEFAULT_BENCHMARK_NAME)
+    scenario_mode = os.environ.get("GRID2OP_SCENARIO_MODE", "benchmark")
+    selected_task_ids = list(task_ids) if task_ids is not None else list(TASKS.keys())
+    llm_config = BaselineConfig(
+        model=_default_model_name(),
+        max_tokens=int(os.environ.get("MAX_TOKENS", "1200")),
+        temperature=float(os.environ.get("TEMPERATURE", "0.7")),
+        top_p=float(os.environ.get("TOP_P", "0.8")),
+        presence_penalty=float(os.environ.get("PRESENCE_PENALTY", "1.5")),
+        top_k=int(os.environ.get("TOP_K", "20")),
+        min_p=float(os.environ.get("MIN_P", "0.0")),
+        repetition_penalty=float(os.environ.get("REPETITION_PENALTY", "1.0")),
+        enable_thinking=False,
+        num_seeds=int(os.environ.get("NUM_SEEDS", "5")),
+        seed_start=int(os.environ.get("SEED_START", "0")),
+        scenario_mode=scenario_mode,  # type: ignore[arg-type]
+    )
+    client = _build_llm_client()
+    task_scores: dict[TaskId, float] = {}
+    with GridEnv(base_url=base_url).sync() as env:
+        for task_id in selected_task_ids:
+            task = TASKS[task_id]
+            benchmark_tiers = benchmark_tiers_for_task(task_id)
+            task_num_seeds = TASK_SEED_OVERRIDES.get(task_id, llm_config.num_seeds)
+            task_episode_scores: list[float] = []
+            for benchmark_tier in benchmark_tiers:
+                for seed in range(
+                    llm_config.seed_start, llm_config.seed_start + task_num_seeds
+                ):
+                    rewards: list[float] = []
+                    steps_taken = 0
+                    score = 0.0
+                    success = False
+                    log_start(task=task_id, env=benchmark_name, model=llm_config.model)
+                    try:
+                        result = env.reset(
+                            task_id=task_id,
+                            seed=seed,
+                            difficulty_level=1,
+                            scenario_mode=scenario_mode,  # type: ignore[arg-type]
+                            benchmark_tier=benchmark_tier,
+                        )
+                        state = env.state()
+                        step_idx = 0
+
+                        while not result.done and step_idx < task.max_steps:
+                            action, _planning_trace = choose_action_with_qwen(
+                                client=client,
+                                env=env,
+                                episode_id=state.episode_id,
+                                task_id=task_id,
+                                observation=result.observation,
+                                step_count=step_idx,
+                                max_steps=task.max_steps,
+                                include_task_description=(step_idx == 0),
+                                llm_config=llm_config,
+                            )
+                            error: str | None = None
+                            try:
+                                result = env.step(action)
+                            except Exception as exc:
+                                error = str(exc)
+                                log_step(
+                                    step=step_idx + 1,
+                                    action=action,
+                                    reward=0.0,
+                                    done=True,
+                                    error=error,
+                                )
+                                raise
+                            reward = float(result.reward or 0.0)
+                            rewards.append(reward)
+                            steps_taken = step_idx + 1
+                            log_step(
+                                step=steps_taken,
+                                action=action,
+                                reward=reward,
+                                done=bool(result.done),
+                                error=error,
+                            )
+                            step_idx += 1
+
+                        state = env.state()
+                        response = requests.post(
+                            f"{base_url}/grader",
+                            json={
+                                "task_id": task_id,
+                                "episode_log": [
+                                    entry.model_dump() for entry in state.episode_log
+                                ],
+                            },
+                            timeout=60,
+                        )
+                        response.raise_for_status()
+                        score = float(response.json()["score"])
+                        task_episode_scores.append(score)
+                        success = score >= SUBMISSION_SUCCESS_SCORE_THRESHOLD
+                    finally:
+                        log_end(
+                            success=success,
+                            steps=steps_taken,
+                            score=score,
+                            rewards=rewards,
+                        )
+            task_scores[task_id] = (
+                round(mean(task_episode_scores), 6) if task_episode_scores else 0.0
+            )
+
+    return task_scores
 
 
 def run_baseline_suite(
@@ -158,9 +287,7 @@ def run_baseline_suite(
     run_paths = prepare_run_paths(timestamp)
     attach_file_logger(run_paths["log"])
 
-    request_config = config or BaselineRequest(
-        model=_default_model_name()
-    )
+    request_config = config or BaselineRequest(model=_default_model_name())
     llm_config = BaselineConfig(
         model=request_config.model,
         max_tokens=request_config.max_tokens,
@@ -182,12 +309,12 @@ def run_baseline_suite(
     episode_lengths: Dict[TaskId, int] = {}
     evaluation_records: list[dict[str, Any]] = []
     logger.info(
-        "Starting baseline suite base_url=%s model=%s num_seeds=%s seed_start=%s local_setup=%s",
+        "Starting baseline suite base_url=%s llm_api_base_url=%s model=%s num_seeds=%s seed_start=%s",
         base_url,
+        _llm_api_base_url(),
         llm_config.model,
         llm_config.num_seeds,
         llm_config.seed_start,
-        _use_local_llm_setup(),
     )
 
     with GridEnv(base_url=base_url).sync() as env:
@@ -528,6 +655,25 @@ def choose_action_with_qwen(
             },
         }
 
+    if task_id == "single_fault":
+        selected_outcome = selectable_simulations[0]
+        return selected_outcome.action, {
+            "proposal_prompt": proposal_prompt,
+            "proposal_raw_output": proposal_raw_output,
+            "proposal_trace": {**proposal_trace, **prefilter_trace},
+            "graph_intelligence": graph_intelligence,
+            "simulations": [
+                serialize_simulation_outcome(outcome) for outcome in simulations
+            ],
+            "final_prompt": "",
+            "final_raw_output": "",
+            "final_trace": {
+                "decision": "single_call_ranked_selection",
+                "reason": selected_outcome.trace.get("reason", ""),
+                "selected_candidate": selected_outcome.candidate_index,
+            },
+        }
+
     final_prompt = build_final_selection_prompt(
         task_id=task_id,
         observation=observation,
@@ -610,12 +756,26 @@ def build_proposal_prompt(
     majority_islands_available = bool(
         observation.metadata.get("majority_islands_available", False)
     )
+    action_schema = (
+        '{"action_type":"disconnect_line|reconnect_line|redispatch|do_nothing","line_id":null|int,"gen_id":null|int,"delta_mw":null|float,"reason":"short string"}'
+    )
+    response_schema = (
+        '{"primary_action":'
+        + action_schema
+        + ',"backup_action_1":'
+        + action_schema
+        + ',"backup_action_2":'
+        + action_schema
+        + "}"
+        if task_id == "single_fault"
+        else '{"candidates":[' + action_schema + "," + action_schema + "," + action_schema + "]}"
+    )
     lines = [
         "You are a grid operator proposing actions for a deterministic simulator.",
         "Propose exactly 3 candidate actions to test in the physics sandbox.",
         "Allowed action types: disconnect_line, reconnect_line, redispatch, do_nothing.",
         "Return a single JSON object only.",
-        'Use this exact schema: {"candidates":[{"action_type":"disconnect_line|reconnect_line|redispatch|do_nothing","line_id":null|int,"gen_id":null|int,"delta_mw":null|float,"reason":"short string"}]}',
+        "Use this exact schema: " + response_schema,
         "Rules: no markdown, no prose, no code fences, no extra keys, exactly 3 candidates.",
         "Diversity rule: use at least two different action types when plausible.",
         "CRITICAL PHYSICS RULE: You must prioritize candidates from the sensitivity_guidance list. These actions have been mathematically verified by power-flow sensitivity factors to reduce the load on the stressed line.",
@@ -648,6 +808,10 @@ def build_proposal_prompt(
             6,
             "TASK RULE: For single_fault, do not propose disconnect_line or reconnect_line. Use redispatch and do_nothing only. Solve congestion by shifting generation, not by cutting topology.",
         )
+        lines.insert(
+            7,
+            "TASK RULE: Rank your output strictly as primary_action first, then backup_action_1, then backup_action_2. The simulator will test all three and execute the highest-ranked safe option.",
+        )
     if task_id == "n_minus_1":
         danger_lines = [
             entry for entry in stressed_lines if float(entry["rho"]) >= 0.92
@@ -666,22 +830,50 @@ def build_proposal_prompt(
         )
         lines.insert(
             7,
-            f"N-1 STRUCTURAL SECURITY: score={float(graph_intelligence.get('n1_security_score', 0.0)):.3f}; bridge_lines={json.dumps(graph_intelligence.get('bridge_lines', []), separators=(',', ':'))}",
+            f"FAULTED_LINE=0; disconnected_now={json.dumps([entry['line_id'] for entry in disconnected], separators=(',', ':'))}",
         )
         lines.insert(
             8,
-            "THRESHOLDS: EMERGENCY if any line rho >= 0.92, WARNING for 0.80 <= rho < 0.92, SAFE if all lines are below 0.80.",
+            f"N-1 PHASE={'emergency' if step_count < 5 else 'steady_state'}; emergency_window_steps_remaining={max(0, 5 - step_count)}",
         )
         lines.insert(
             9,
-            "EMERGENCY_LINES=" + json.dumps(danger_lines, separators=(",", ":")),
+            "EMERGENCY OBJECTIVE: In steps 1-5, prioritize actions that bring max_rho below 0.92 as fast as possible. Clearing the emergency window is the top priority.",
         )
         lines.insert(
             10,
-            "WARNING_LINES=" + json.dumps(warning_lines, separators=(",", ":")),
+            "STEADY-STATE OBJECTIVE: From step 6 onward, prioritize keeping max_rho below 0.90 on as many steps as possible while preserving survivability.",
         )
         lines.insert(
             11,
+            "RECONNECTION OBJECTIVE: When line 0 cooldown reaches 0, include a reconnect_line candidate for line 0 unless graph intelligence or current overloads strongly suggest it is unsafe.",
+        )
+        lines.insert(
+            12,
+            "CANDIDATE RULE: In the emergency phase, include at least one redispatch candidate aimed at immediate rho reduction. Do not fill the set with passive do_nothing-style choices.",
+        )
+        lines.insert(
+            13,
+            "CANDIDATE RULE: If no action looks clearly better, still propose the smallest safe redispatch or a safe reconnect test rather than defaulting all candidates toward do_nothing.",
+        )
+        lines.insert(
+            14,
+            f"N-1 STRUCTURAL SECURITY: score={float(graph_intelligence.get('n1_security_score', 0.0)):.3f}; bridge_lines={json.dumps(graph_intelligence.get('bridge_lines', []), separators=(',', ':'))}",
+        )
+        lines.insert(
+            15,
+            "THRESHOLDS: EMERGENCY if any line rho >= 0.92, WARNING for 0.80 <= rho < 0.92, SAFE if all lines are below 0.80.",
+        )
+        lines.insert(
+            16,
+            "EMERGENCY_LINES=" + json.dumps(danger_lines, separators=(",", ":")),
+        )
+        lines.insert(
+            17,
+            "WARNING_LINES=" + json.dumps(warning_lines, separators=(",", ":")),
+        )
+        lines.insert(
+            18,
             "RECONNECT_WINDOW_LINES="
             + json.dumps(cooldown_zero_lines, separators=(",", ":")),
         )
@@ -806,6 +998,19 @@ def build_final_selection_prompt(
             7,
             "RULE: If a simulated candidate safely reduces max_rho compared to the current state, you MUST select it over do_nothing, no matter how small the reduction is. Do not choose do_nothing unless every other candidate increases max_rho or causes a failure. Safe, incremental redispatch improvements are the only way to win.",
         )
+    if task_id == "n_minus_1":
+        lines.insert(
+            7,
+            "RULE: In steps 1-5, prioritize candidates that clear the emergency by bringing max_rho below 0.92. Do not choose do_nothing in the emergency window if a safe simulated action lowers max_rho.",
+        )
+        lines.insert(
+            8,
+            "RULE: When a safe reconnect_line action for line 0 is available after cooldown, strongly prefer it if it improves or preserves security.",
+        )
+        lines.insert(
+            9,
+            "RULE: After step 5, prefer candidates that keep max_rho below 0.90 on future steps rather than merely surviving at higher stress.",
+        )
     if task_id == "multi_stage_cascade":
         lines.insert(
             7,
@@ -927,7 +1132,14 @@ def parse_candidate_proposals(
     task_id: TaskId = "n_minus_1",
 ) -> tuple[list[tuple[GridAction, dict[str, Any]]], dict[str, Any]]:
     payload = parse_json_action(content)
-    raw_candidates = payload.get("candidates", [])
+    if task_id == "single_fault":
+        raw_candidates = [
+            payload.get("primary_action"),
+            payload.get("backup_action_1"),
+            payload.get("backup_action_2"),
+        ]
+    else:
+        raw_candidates = payload.get("candidates", [])
     candidates: list[tuple[GridAction, dict[str, Any]]] = []
     if isinstance(raw_candidates, list):
         for item in raw_candidates[:3]:
@@ -1650,14 +1862,22 @@ def append_evaluation_markdown(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--baseline-suite",
+        action="store_true",
+        help="Run the internal multi-task baseline suite instead of the submission episode runner.",
+    )
+    parser.add_argument(
         "--task-id",
         dest="task_ids",
         nargs="+",
         choices=sorted(TASKS.keys()),
-        help="Run only the selected task ids. Defaults to all tasks.",
+        help="Run only the selected task ids for --baseline-suite. Defaults to all tasks.",
     )
     args = parser.parse_args()
 
-    base_url = os.environ.get("GRID2OP_BASE_URL", "http://127.0.0.1:7860")
-    result = run_baseline_suite(base_url=base_url, task_ids=args.task_ids)
-    print(result.model_dump_json(indent=2))
+    if args.baseline_suite:
+        base_url = os.environ.get("GRID2OP_BASE_URL", DEFAULT_ENV_BASE_URL)
+        result = run_baseline_suite(base_url=base_url, task_ids=args.task_ids)
+        print(result.model_dump_json(indent=2))
+    else:
+        run_submission_episodes(task_ids=args.task_ids)

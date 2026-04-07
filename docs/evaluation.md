@@ -923,3 +923,126 @@ Summary scores:
 }
 ```
 
+## Run 20260407_130112
+
+- Model: `openai/gpt-oss-20b:groq`
+- Tasks: `single_fault, n_minus_1, cascade_prevent, multi_stage_cascade`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_130112.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_130112.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_130112.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_130112.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260407_130112.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260407_130112.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Time (s) | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `single_fault` | `single_fault_easy` | `0.750000` | `10.00` | `30.82` | `9.00` |
+| `single_fault` | `single_fault_moderate` | `0.725000` | `10.00` | `30.94` | `7.50` |
+| `single_fault` | `single_fault_severe` | `1.000000` | `1.00` | `5.72` | `0.00` |
+| `n_minus_1` | `n_minus_1_fixed` | `0.645333` | `20.00` | `57.54` | `17.00` |
+| `cascade_prevent` | `cascade_prevent_easy` | `1.000000` | `30.00` | `86.27` | `28.50` |
+| `cascade_prevent` | `cascade_prevent_medium` | `1.000000` | `30.00` | `87.11` | `25.00` |
+| `cascade_prevent` | `cascade_prevent_extreme` | `0.596666` | `16.50` | `49.61` | `15.50` |
+| `multi_stage_cascade` | `multi_stage_cascade_expert` | `0.831466` | `28.40` | `96.60` | `9.80` |
+
+Summary scores:
+```json
+{
+  "model": "openai/gpt-oss-20b:groq",
+  "scores": {
+    "single_fault": 0.825,
+    "n_minus_1": 0.645333,
+    "cascade_prevent": 0.865556,
+    "multi_stage_cascade": 0.831466
+  },
+  "episode_lengths": {
+    "single_fault": 7,
+    "n_minus_1": 20,
+    "cascade_prevent": 26,
+    "multi_stage_cascade": 28
+  }
+}
+```
+
+## Run 20260407_145958
+
+- Model: `openai/gpt-oss-20b:groq`
+- Tasks: `single_fault, n_minus_1, cascade_prevent, multi_stage_cascade`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_145958.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_145958.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_145958.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_145958.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260407_145958.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260407_145958.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Time (s) | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `single_fault` | `single_fault_easy` | `0.750000` | `10.00` | `30.10` | `9.00` |
+| `single_fault` | `single_fault_moderate` | `0.725000` | `10.00` | `28.88` | `7.50` |
+| `single_fault` | `single_fault_severe` | `1.000000` | `1.00` | `6.25` | `0.00` |
+| `n_minus_1` | `n_minus_1_fixed` | `0.575000` | `20.00` | `59.77` | `17.25` |
+| `cascade_prevent` | `cascade_prevent_easy` | `1.000000` | `30.00` | `92.46` | `29.00` |
+| `cascade_prevent` | `cascade_prevent_medium` | `1.000000` | `30.00` | `94.56` | `27.00` |
+| `cascade_prevent` | `cascade_prevent_extreme` | `0.596666` | `16.50` | `50.18` | `16.00` |
+| `multi_stage_cascade` | `multi_stage_cascade_expert` | `0.917766` | `30.00` | `94.55` | `10.00` |
+
+Summary scores:
+```json
+{
+  "model": "openai/gpt-oss-20b:groq",
+  "scores": {
+    "single_fault": 0.825,
+    "n_minus_1": 0.575,
+    "cascade_prevent": 0.865556,
+    "multi_stage_cascade": 0.917766
+  },
+  "episode_lengths": {
+    "single_fault": 7,
+    "n_minus_1": 20,
+    "cascade_prevent": 26,
+    "multi_stage_cascade": 30
+  }
+}
+```
+
+## Run 20260407_163224
+
+- Model: `openai/gpt-oss-20b:groq`
+- Tasks: `single_fault, n_minus_1, cascade_prevent, multi_stage_cascade`
+- Seeds: `0` to `4`
+- Scenario mode: `benchmark`
+- Sampling: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+- JSON output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_163224.json](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_163224.json)
+- CSV output: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_163224.csv](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/evals/baseline_eval_20260407_163224.csv)
+- Log file: [/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260407_163224.log](/home/sidharth/Desktop/Openenv_modules/grid2op_env/outputs/logs/baseline_run_20260407_163224.log)
+
+| Task | Tier | Mean Score | Mean Episode Length | Mean Time (s) | Mean Do-Nothing Steps |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `single_fault` | `single_fault_easy` | `0.750000` | `10.00` | `19.32` | `10.00` |
+| `single_fault` | `single_fault_moderate` | `0.750000` | `10.00` | `18.22` | `10.00` |
+| `single_fault` | `single_fault_severe` | `0.750000` | `10.00` | `20.68` | `9.00` |
+| `n_minus_1` | `n_minus_1_fixed` | `0.576750` | `15.75` | `54.19` | `15.25` |
+| `cascade_prevent` | `cascade_prevent_easy` | `1.000000` | `30.00` | `97.00` | `28.50` |
+| `cascade_prevent` | `cascade_prevent_medium` | `1.000000` | `30.00` | `93.13` | `28.50` |
+| `cascade_prevent` | `cascade_prevent_extreme` | `0.596666` | `16.50` | `52.60` | `15.00` |
+| `multi_stage_cascade` | `multi_stage_cascade_expert` | `0.812543` | `28.00` | `94.51` | `8.50` |
+
+Summary scores:
+```json
+{
+  "model": "openai/gpt-oss-20b:groq",
+  "scores": {
+    "single_fault": 0.75,
+    "n_minus_1": 0.57675,
+    "cascade_prevent": 0.865556,
+    "multi_stage_cascade": 0.812543
+  },
+  "episode_lengths": {
+    "single_fault": 10,
+    "n_minus_1": 16,
+    "cascade_prevent": 26,
+    "multi_stage_cascade": 28
+  }
+}
+```
+
