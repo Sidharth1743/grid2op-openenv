@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from fastapi import Request
 from openenv.core.env_server.http_server import create_app
 from fastapi import HTTPException
+
+try:
+    from pandas.errors import SettingWithCopyWarning
+except Exception:  # pragma: no cover - optional dependency import guard
+    SettingWithCopyWarning = None
 
 try:
     from ..models import (
@@ -44,6 +50,9 @@ except ImportError:
 
 configure_logging()
 logger = logging.getLogger(__name__)
+
+if SettingWithCopyWarning is not None:
+    warnings.filterwarnings("ignore", category=SettingWithCopyWarning)
 
 app = create_app(
     GridEnvironment,
