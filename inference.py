@@ -262,6 +262,7 @@ def run_submission_episodes(task_ids: Sequence[TaskId] | None = None) -> dict[Ta
                         )
                         response.raise_for_status()
                         score = float(response.json()["score"])
+                        score = max(0.01, min(0.99, score))
                         task_episode_scores.append(score)
                         success = score >= SUBMISSION_SUCCESS_SCORE_THRESHOLD
                     finally:
@@ -591,6 +592,14 @@ def choose_action_with_qwen(
         n_gen=len(observation.gen_p),
         redispatchable_generators=redispatchable_generators,
         redispatch_generators=redispatch_generators,
+    )
+    proposal_candidates = supplement_candidate_proposals(
+        task_id=task_id,
+        observation=observation,
+        graph_intelligence=graph_intelligence,
+        redispatch_generators=redispatch_generators,
+        proposal_candidates=proposal_candidates,
+        parsed_candidate_count=int(proposal_trace.get("parsed_candidate_count", 0)),
     )
     proposal_candidates, prefilter_trace = filter_candidate_proposals(
         task_id=task_id,
@@ -1164,39 +1173,7 @@ def parse_candidate_proposals(
         seen.add(key)
         deduped.append((action, trace))
 
-    fallback_pool = [
-        (
-            GridAction(do_nothing=True),
-            {"decision": "do_nothing", "reason": "fallback_baseline"},
-        )
-    ]
-    if redispatch_generators:
-        for context in redispatch_generators:
-            for delta in context.allowed_deltas:
-                if abs(delta) < 1e-9:
-                    continue
-                fallback_pool.append(
-                    (
-                        GridAction(redispatch={int(context.gen_id): float(delta)}),
-                        {
-                            "decision": "redispatch",
-                            "reason": f"fallback_generator_{int(context.gen_id)}_{float(delta):.4f}",
-                        },
-                    )
-                )
-    else:
-        fallback_pool.extend(
-            [
-                (
-                    GridAction(redispatch={0: 10.0}),
-                    {"decision": "redispatch", "reason": "fallback_generator_0_up"},
-                ),
-                (
-                    GridAction(redispatch={0: -10.0}),
-                    {"decision": "redispatch", "reason": "fallback_generator_0_down"},
-                ),
-            ]
-        )
+    fallback_pool = build_diverse_fallback_pool(redispatch_generators)
     for action, trace in fallback_pool:
         if len(deduped) >= 3:
             break
@@ -1210,6 +1187,167 @@ def parse_candidate_proposals(
         "parsed_candidate_count": len(candidates),
         "deduped_candidate_count": len(deduped[:3]),
     }
+
+
+def build_diverse_fallback_pool(
+    redispatch_generators: Sequence[RedispatchGeneratorContext] | None,
+) -> list[tuple[GridAction, dict[str, Any]]]:
+    fallback_pool: list[tuple[GridAction, dict[str, Any]]] = []
+    if redispatch_generators:
+        signed_extremes: list[tuple[float, int, float]] = []
+        for context in redispatch_generators:
+            feasible = [
+                float(value) for value in context.allowed_deltas if abs(float(value)) > 1e-9
+            ]
+            if not feasible:
+                continue
+            negatives = [value for value in feasible if value < 0.0]
+            positives = [value for value in feasible if value > 0.0]
+            if negatives:
+                signed_extremes.append(
+                    (abs(min(negatives)), int(context.gen_id), min(negatives))
+                )
+            if positives:
+                signed_extremes.append(
+                    (abs(max(positives)), int(context.gen_id), max(positives))
+                )
+        for _magnitude, gen_id, delta in sorted(
+            signed_extremes,
+            key=lambda item: (-item[0], abs(item[2]), item[1], item[2]),
+        ):
+            fallback_pool.append(
+                (
+                    GridAction(redispatch={gen_id: float(delta)}),
+                    {
+                        "decision": "redispatch",
+                        "reason": f"fallback_generator_{gen_id}_{float(delta):.4f}",
+                    },
+                )
+            )
+    else:
+        fallback_pool.extend(
+            [
+                (
+                    GridAction(redispatch={0: 10.0}),
+                    {"decision": "redispatch", "reason": "fallback_generator_0_up"},
+                ),
+                (
+                    GridAction(redispatch={0: -10.0}),
+                    {"decision": "redispatch", "reason": "fallback_generator_0_down"},
+                ),
+            ]
+        )
+
+    fallback_pool.append(
+        (
+            GridAction(do_nothing=True),
+            {"decision": "do_nothing", "reason": "fallback_baseline"},
+        )
+    )
+    return fallback_pool
+
+
+def supplement_candidate_proposals(
+    task_id: TaskId,
+    observation: GridObservation,
+    graph_intelligence: dict[str, Any],
+    redispatch_generators: Sequence[RedispatchGeneratorContext],
+    proposal_candidates: Sequence[tuple[GridAction, dict[str, Any]]],
+    parsed_candidate_count: int,
+) -> list[tuple[GridAction, dict[str, Any]]]:
+    emergency = is_emergency_state(task_id=task_id, observation=observation)
+    heuristic_candidates = build_heuristic_candidates(
+        task_id=task_id,
+        observation=observation,
+        graph_intelligence=graph_intelligence,
+        redispatch_generators=redispatch_generators,
+    )
+    candidate_stream: list[tuple[GridAction, dict[str, Any]]] = []
+    if emergency or parsed_candidate_count == 0:
+        candidate_stream.extend(heuristic_candidates)
+    candidate_stream.extend(proposal_candidates)
+    if not emergency and parsed_candidate_count > 0:
+        candidate_stream.extend(heuristic_candidates)
+
+    deduped: list[tuple[GridAction, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for action, trace in candidate_stream:
+        key = json.dumps(action.model_dump(), sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((action, trace))
+        if len(deduped) >= 3:
+            break
+    return deduped
+
+
+def build_heuristic_candidates(
+    task_id: TaskId,
+    observation: GridObservation,
+    graph_intelligence: dict[str, Any],
+    redispatch_generators: Sequence[RedispatchGeneratorContext],
+) -> list[tuple[GridAction, dict[str, Any]]]:
+    del graph_intelligence
+    heuristics: list[tuple[GridAction, dict[str, Any]]] = []
+    for item in observation.sensitivity_guidance:
+        action_type = item.get("action_type")
+        target_id = item.get("target_id")
+        try:
+            target_id_int = int(target_id)
+        except (TypeError, ValueError):
+            continue
+        if action_type == "disconnect_line" and task_id != "single_fault":
+            heuristics.append(
+                (
+                    GridAction(line_set={target_id_int: -1}),
+                    {
+                        "decision": "heuristic_disconnect",
+                        "reason": f"sensitivity_guidance_{target_id_int}",
+                    },
+                )
+            )
+        elif action_type == "redispatch":
+            delta_value = item.get("delta_mw")
+            try:
+                delta_float = float(delta_value)
+            except (TypeError, ValueError):
+                delta_float = None
+            if delta_float is None:
+                continue
+            context = next(
+                (
+                    context
+                    for context in redispatch_generators
+                    if int(context.gen_id) == target_id_int
+                ),
+                None,
+            )
+            if context is None:
+                continue
+            constrained = constrain_redispatch_delta(delta_float, context)
+            if constrained is None:
+                continue
+            heuristics.append(
+                (
+                    GridAction(redispatch={target_id_int: constrained}),
+                    {
+                        "decision": "heuristic_redispatch",
+                        "reason": f"sensitivity_guidance_{target_id_int}_{constrained}",
+                    },
+                )
+            )
+
+    if heuristics:
+        heuristics.append(
+            (
+                GridAction(do_nothing=True),
+                {"decision": "do_nothing", "reason": "heuristic_safe_fallback"},
+            )
+        )
+        return heuristics
+
+    return build_diverse_fallback_pool(redispatch_generators)
 
 
 def filter_candidate_proposals(
@@ -1340,6 +1478,11 @@ def choose_best_simulation(
         current_max_rho = (
             max(observation.rho) if observation and observation.rho else None
         )
+        safe = prefer_active_control_in_emergencies(
+            task_id=task_id,
+            observation=observation,
+            simulations=safe,
+        )
         if task_id == "single_fault":
             improving = [
                 outcome
@@ -1382,6 +1525,80 @@ def choose_best_simulation(
             ),
         )
     return min(simulations, key=lambda outcome: outcome.candidate_index)
+
+
+def is_emergency_state(task_id: TaskId, observation: GridObservation | None) -> bool:
+    if observation is None or not observation.rho:
+        return False
+    current_max_rho = max(float(value) for value in observation.rho)
+    max_overflow = max((int(value) for value in observation.timestep_overflow), default=0)
+    if task_id == "n_minus_1":
+        return current_max_rho >= 0.92
+    if task_id == "cascade_prevent":
+        return current_max_rho > 1.0 or max_overflow > 0
+    if task_id == "multi_stage_cascade":
+        return current_max_rho > 1.0 or max_overflow > 0
+    return current_max_rho > 0.8
+
+
+def prefer_active_control_in_emergencies(
+    task_id: TaskId,
+    observation: GridObservation | None,
+    simulations: Sequence[SimulationOutcome],
+) -> list[SimulationOutcome]:
+    if not is_emergency_state(task_id=task_id, observation=observation):
+        return list(simulations)
+
+    do_nothing = [
+        outcome for outcome in simulations if outcome.action.do_nothing
+    ]
+    active = [outcome for outcome in simulations if not outcome.action.do_nothing]
+    if not do_nothing or not active:
+        return list(simulations)
+
+    best_noop = min(
+        do_nothing,
+        key=lambda outcome: (
+            max_simulated_overflow(outcome),
+            len(outcome.overloaded_line_ids),
+            outcome.max_rho,
+            outcome.candidate_index,
+        ),
+    )
+    epsilon = 0.02 if task_id == "multi_stage_cascade" else 0.01
+    viable_active = [
+        outcome
+        for outcome in active
+        if max_simulated_overflow(outcome) <= max_simulated_overflow(best_noop)
+        and len(outcome.overloaded_line_ids) <= len(best_noop.overloaded_line_ids)
+        and outcome.max_rho <= best_noop.max_rho + epsilon
+    ]
+    if not viable_active:
+        return list(simulations)
+
+    preferred = sorted(
+        viable_active,
+        key=lambda outcome: (
+            max_simulated_overflow(outcome),
+            len(outcome.overloaded_line_ids),
+            outcome.max_rho,
+            len(outcome.action.line_set),
+            outcome.candidate_index,
+        ),
+    )
+    remainder = [
+        outcome
+        for outcome in simulations
+        if outcome not in preferred
+    ]
+    return preferred + remainder
+
+
+def max_simulated_overflow(outcome: SimulationOutcome) -> int:
+    overflow = outcome.raw_result.get("timestep_overflow", [])
+    if not isinstance(overflow, list):
+        return 0
+    return max((int(value) for value in overflow), default=0)
 
 
 def serialize_simulation_outcome(outcome: SimulationOutcome) -> dict[str, Any]:

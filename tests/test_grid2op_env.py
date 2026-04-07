@@ -8,8 +8,10 @@ from grid2op_env.models import (
     RedispatchGeneratorContext,
 )
 from grid2op_env.inference import (
+    build_diverse_fallback_pool,
     build_final_selection_prompt,
     build_proposal_prompt,
+    prefer_active_control_in_emergencies,
     filter_candidate_proposals,
     parse_candidate_proposals,
     select_final_action,
@@ -155,6 +157,34 @@ def test_candidate_proposals_are_parsed_and_deduped():
     assert candidates[2][0].redispatch == {0: -5.0}
 
 
+def test_diverse_fallback_pool_spreads_across_generators():
+    pool = build_diverse_fallback_pool(
+        [
+            RedispatchGeneratorContext(
+                gen_id=0,
+                p_mw=81.4,
+                max_ramp_up=5.0,
+                max_ramp_down=5.0,
+                allowed_delta_min=-5.0,
+                allowed_delta_max=5.0,
+                allowed_deltas=[-5.0, -2.5, 2.5, 5.0],
+            ),
+            RedispatchGeneratorContext(
+                gen_id=1,
+                p_mw=70.0,
+                max_ramp_up=10.0,
+                max_ramp_down=10.0,
+                allowed_delta_min=-10.0,
+                allowed_delta_max=10.0,
+                allowed_deltas=[-10.0, -5.0, 5.0, 10.0],
+            ),
+        ]
+    )
+    assert pool[0][0].redispatch in ({1: -10.0}, {1: 10.0})
+    assert any(action.redispatch == {0: -5.0} for action, _ in pool)
+    assert pool[-1][0].do_nothing is True
+
+
 def test_final_selection_prefers_simulated_candidate():
     simulations = [
         SimulationOutcome(
@@ -194,6 +224,50 @@ def test_final_selection_prefers_simulated_candidate():
     action, trace = select_final_action(payload, simulations, n_line=20, n_gen=6)
     assert action.line_set == {0: 1}
     assert trace["selected_candidate"] == 1
+
+
+def test_emergency_preference_avoids_do_nothing_when_active_control_is_close():
+    observation = GridObservation(
+        rho=[1.05, 0.9],
+        gen_p=[10.0],
+        load_p=[5.0],
+        line_status=[True, True],
+        timestep_overflow=[0, 0],
+        sensitivity_guidance=[],
+    )
+    preferred = prefer_active_control_in_emergencies(
+        task_id="n_minus_1",
+        observation=observation,
+        simulations=[
+            SimulationOutcome(
+                candidate_index=1,
+                action=GridAction(do_nothing=True),
+                trace={},
+                done=False,
+                simulated_reward=0.0,
+                max_rho=1.00,
+                overloaded_line_ids=[0],
+                disconnected_lines=[],
+                convergence_failed=False,
+                exceptions=[],
+                raw_result={"timestep_overflow": [1, 0]},
+            ),
+            SimulationOutcome(
+                candidate_index=2,
+                action=GridAction(redispatch={0: -5.0}),
+                trace={},
+                done=False,
+                simulated_reward=0.0,
+                max_rho=1.005,
+                overloaded_line_ids=[0],
+                disconnected_lines=[],
+                convergence_failed=False,
+                exceptions=[],
+                raw_result={"timestep_overflow": [1, 0]},
+            ),
+        ],
+    )
+    assert preferred[0].action.do_nothing is False
 
 
 def test_graph_analysis_returns_expected_keys():

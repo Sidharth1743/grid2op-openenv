@@ -1020,6 +1020,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 guidance_item = {
                     "action_type": "redispatch",
                     "target_id": int(gen_id),
+                    "delta_mw": round(delta_value, 4),
                     "expected_rho_change": round(global_rho_change, 6),
                 }
                 if self._task_id == "multi_stage_cascade":

@@ -11,6 +11,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _clamp_submission_score(raw_score: float) -> float:
+    return round(max(0.01, min(0.99, raw_score)), 6)
+
+
 def grade_episode(task_id: TaskId, episode_log: Iterable[EpisodeStepLog]) -> float:
     logs = list(episode_log)
     logger.info("Grading episode task_id=%s steps=%s", task_id, len(logs))
@@ -27,7 +31,7 @@ def grade_episode(task_id: TaskId, episode_log: Iterable[EpisodeStepLog]) -> flo
 
 def grade_single_fault(episode_log: list[EpisodeStepLog]) -> float:
     if not episode_log:
-        return 0.0
+        return 0.01
 
     max_steps = 10
     survival_ratio = min(1.0, len(episode_log) / max_steps)
@@ -52,12 +56,12 @@ def grade_single_fault(episode_log: list[EpisodeStepLog]) -> float:
         final_bonus = 0.0
 
     score = (survival_ratio * 0.7) + target_bonus + final_bonus
-    return round(min(1.0, max(0.0, score, legacy_success_score)), 6)
+    return _clamp_submission_score(max(score, legacy_success_score))
 
 
 def grade_n_minus_1(episode_log: list[EpisodeStepLog], max_steps: int = 20) -> float:
     if not episode_log:
-        return 0.0
+        return 0.01
     emergency_clear_step = next(
         (entry.step for entry in episode_log[:5] if float(entry.max_rho) < 0.92),
         None,
@@ -80,14 +84,14 @@ def grade_n_minus_1(episode_log: list[EpisodeStepLog], max_steps: int = 20) -> f
     survival_ratio = min(max_steps, max(entry.step for entry in episode_log)) / max_steps
     mastery_score = (0.30 * emergency_score) + (0.50 * security_ratio) + (0.20 * reconnection_score)
     final_score = mastery_score * survival_ratio
-    return round(min(1.0, max(0.0, final_score)), 6)
+    return _clamp_submission_score(final_score)
 
 
 def grade_cascade_prevent(
     episode_log: list[EpisodeStepLog], max_steps: int = 30
 ) -> float:
     if not episode_log:
-        return 0.0
+        return 0.01
     containment_ratio = sum(1 for entry in episode_log if not entry.auto_trip_detected) / max_steps
 
     containment_steps = [entry for entry in episode_log if not entry.auto_trip_detected]
@@ -118,14 +122,14 @@ def grade_cascade_prevent(
             recovery_score = max(0.0, 1.0 - ((stabilize_step - first_overload_step) / 10.0))
 
     score = (0.5 * containment_ratio) + (0.3 * stability_ratio) + (0.2 * recovery_score)
-    return round(min(1.0, max(0.0, score)), 6)
+    return _clamp_submission_score(score)
 
 
 def grade_multi_stage_cascade(
     episode_log: list[EpisodeStepLog], max_steps: int = 30
 ) -> float:
     if not episode_log:
-        return 0.0
+        return 0.01
 
     reached_stage_2 = any(entry.step >= 10 for entry in episode_log)
     reached_stage_3 = any(entry.step >= 20 for entry in episode_log)
@@ -171,4 +175,4 @@ def grade_multi_stage_cascade(
         + 0.20 * island_quality
         + 0.10 * speed_score
     )
-    return round(min(1.0, max(0.0, score)), 6)
+    return _clamp_submission_score(score)
