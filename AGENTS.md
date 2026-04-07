@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The package is rooted at the repository top level. Core models live in `models.py`, the baseline agent in `inference.py`, the client helper in `client.py`, and topology analysis in `graph_analysis.py`. The FastAPI/OpenEnv server lives in `server/` with `app.py`, `grid_environment.py`, `tasks.py`, `graders.py`, and logging helpers. Tests are in `tests/`, reference docs in `docs/` and `architecture/`, and submission utilities in `submission/`. Runtime artifacts go under `outputs/logs/` and `outputs/evals/`.
+The package is rooted at the repository top level. Core models live in `models.py`, the baseline agent in `inference.py`, the client helper in `client.py`, and topology analysis in `graph_analysis.py`. The FastAPI/OpenEnv server lives in `server/` with `app.py`, `environment.py`, `tasks.py`, `graders.py`, and logging helpers. Tests are in `tests/`, reference docs in `docs/` and `architecture/`, and submission utilities in `submission/`. Runtime artifacts go under `outputs/logs/` and `outputs/evals/`.
 
 ## Build, Test, and Development Commands
 Use `uv` for local work.

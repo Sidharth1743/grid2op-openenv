@@ -1,3 +1,13 @@
+---
+title: Grid2Op Environment
+emoji: "⚡"
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Grid2Op Environment
 
 Standalone OpenEnv environment package for the full `PROJECT.md` design.
@@ -22,7 +32,7 @@ grid2op_env/
 │   └── evals/
 ├── pyproject.toml
 └── server/
-    ├── grid_environment.py
+    ├── environment.py
     ├── tasks.py
     ├── graders.py
     ├── app.py

@@ -1,6 +1,7 @@
-openenv-core[core]>=0.2.2
-grid2op>=1.10.5
-numpy>=1.24.0
-openai>=2.7.2
-python-dotenv>=1.0.1
-requests>=2.31.0
+openenv-core[core]
+grid2op
+numpy
+openai
+python-dotenv
+requests
+numba

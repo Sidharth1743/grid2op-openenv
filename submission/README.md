@@ -114,7 +114,7 @@ Must include:
 - ✅ `reset()` produces clean state?
 - ✅ Action/observation types well-designed and documented?
 - ✅ Reward function provides useful varying signal (not just sparse)?
-- ✅ Episode boundaries sensible?
+- ✅ Episode boundaries sensible?dob
 
 #### Code quality & spec compliance (15%)
 - ✅ `openenv validate` passes?

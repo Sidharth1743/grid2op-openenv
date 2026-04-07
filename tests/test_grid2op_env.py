@@ -24,7 +24,7 @@ from grid2op_env.server.graders import (
     grade_n_minus_1,
     grade_single_fault,
 )
-from grid2op_env.server.grid_environment import GridEnvironment
+from grid2op_env.server.environment import GridEnvironment
 from grid2op_env.server.tasks import TASKS, inject_scenario_raw
 
 

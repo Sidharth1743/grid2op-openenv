@@ -20,7 +20,7 @@ try:
         TaskListResponse,
     )
     from .graders import grade_episode
-    from .grid_environment import GridEnvironment
+    from .environment import GridEnvironment
     from .logging_utils import configure_logging
     from .tasks import task_list
 except ImportError:
@@ -38,7 +38,7 @@ except ImportError:
         TaskListResponse,
     )
     from server.graders import grade_episode
-    from server.grid_environment import GridEnvironment
+    from server.environment import GridEnvironment
     from server.logging_utils import configure_logging
     from server.tasks import task_list
 

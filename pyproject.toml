@@ -27,7 +27,7 @@ lightsim = [
 
 [project.scripts]
 server = "grid2op_env.server.app:main"
-grid2op-smoke = "grid2op_env.server.grid_environment:smoke_main"
+grid2op-smoke = "grid2op_env.server.environment:smoke_main"
 
 [tool.setuptools]
 include-package-data = true
