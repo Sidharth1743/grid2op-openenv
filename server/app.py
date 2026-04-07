@@ -27,6 +27,7 @@ try:
     )
     from .graders import grade_episode
     from .environment import GridEnvironment
+    from .gradio_ui import build_grid2op_gradio_app
     from .logging_utils import configure_logging
     from .tasks import task_list
 except ImportError:
@@ -45,6 +46,7 @@ except ImportError:
     )
     from server.graders import grade_episode
     from server.environment import GridEnvironment
+    from server.gradio_ui import build_grid2op_gradio_app
     from server.logging_utils import configure_logging
     from server.tasks import task_list
 
@@ -60,6 +62,7 @@ app = create_app(
     GridObservation,
     env_name="grid2op_env",
     max_concurrent_envs=2,
+    gradio_builder=build_grid2op_gradio_app,
 )
 
 
