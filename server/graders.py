@@ -126,7 +126,7 @@ def grade_cascade_prevent(
 
 
 def grade_multi_stage_cascade(
-    episode_log: list[EpisodeStepLog], max_steps: int = 25
+    episode_log: list[EpisodeStepLog], max_steps: int = 30
 ) -> float:
     if not episode_log:
         return 0.01

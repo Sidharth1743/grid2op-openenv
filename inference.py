@@ -705,7 +705,7 @@ def choose_action_with_qwen(
             },
         }
 
-    if task_id in {"single_fault", "n_minus_1", "cascade_prevent"}:
+    if task_id in {"single_fault", "n_minus_1"}:
         selected_outcome = choose_best_simulation(
             task_id=task_id,
             observation=observation,
