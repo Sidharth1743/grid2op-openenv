@@ -125,6 +125,39 @@ All four tasks use the same underlying grid:
 
 ---
 
+## The Scenario Dataset
+
+Our companion repository, **[grid2op-data](https://github.com/Jayashree1743/grid2op-data)**, provides comprehensive data intelligence for all `1,014` scenarios.
+
+### Data Files per Scenario
+
+Each scenario folder contains:
+
+| File | Description | Example Values |
+|---|---|---|
+| `load_p.csv` | Active power demand (MW) | 11 columns, 8,065 rows |
+| `load_q.csv` | Reactive power demand (MVAr) | ~70% of active power |
+| `prod_p.csv` | Generator output (MW) | 6 generators tracked |
+| `prod_v.csv` | Voltage setpoints (p.u.) | Typically 0.95–1.05 |
+| `*_forecasted.csv` | 5-minute-ahead forecasts | Used by RL agents |
+
+### Key Dataset Statistics
+
+```text
+Total scenarios analyzed:    1,014
+Timesteps per scenario:      8,065 (~4.7 weeks each)
+Total data points:           ~8.2 million
+Average system load:         ~257 MW
+Peak load observed:          ~321 MW (scenario 0001)
+Minimum load observed:       ~190 MW
+Average peak hour:           19:24 (7:24 PM)
+Reactive power burden:       0.70 (load_q / load_p)
+Average ramp rate:           1.72 MW per 5-min step
+Supply-demand imbalance:     4.92 MW (mean)
+```
+
+---
+
 ## Action Space
 
 Agents submit a `GridAction` with any combination of:
