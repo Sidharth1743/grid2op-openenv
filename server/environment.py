@@ -24,7 +24,7 @@ try:
         SimulationResult,
         TaskId,
     )
-    from .tasks import TASKS, inject_scenario_raw
+    from .tasks import TASKS, benchmark_tiers_for_task, inject_scenario_raw
 except ImportError:
     from graph_analysis import analyze_grid_topology
     from models import (
@@ -38,7 +38,7 @@ except ImportError:
         SimulationResult,
         TaskId,
     )
-    from server.tasks import TASKS, inject_scenario_raw
+    from server.tasks import TASKS, benchmark_tiers_for_task, inject_scenario_raw
 
 try:
     from lightsim2grid.solver import SolverError
@@ -97,7 +97,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         episode_id: str | None = None,
         task_id: TaskId = "single_fault",
         difficulty_level: int | None = None,
-        scenario_mode: ScenarioMode = "curriculum",
+        scenario_mode: ScenarioMode = "benchmark",
         benchmark_tier: str | None = None,
         **kwargs,
     ) -> GridObservation:
@@ -117,6 +117,9 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 episode_id,
                 difficulty_level,
             )
+            effective_benchmark_tier = benchmark_tier
+            if scenario_mode == "benchmark" and effective_benchmark_tier is None:
+                effective_benchmark_tier = benchmark_tiers_for_task(task_id)[0]
 
             raw_observation, scenario_metadata = inject_scenario_raw(
                 self._env,
@@ -124,7 +127,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
                 seed=seed,
                 difficulty_level=difficulty_level,
                 scenario_mode=scenario_mode,
-                benchmark_tier=benchmark_tier,
+                benchmark_tier=effective_benchmark_tier,
             )
             self._state = GridState(
                 episode_id=episode_id or str(uuid4()),
