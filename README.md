@@ -4,7 +4,7 @@
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
 [![Grid2Op](https://img.shields.io/badge/Grid2Op-l2rpn__case14__sandbox-green)](https://grid2op.readthedocs.io)
-[![HF Spaces](https://img.shields.io/badge/HuggingFace-Spaces-yellow)](https://huggingface.co/spaces)
+[![HF Spaces](https://img.shields.io/badge/HuggingFace-Spaces-yellow)](https://huggingface.co/spaces/Sidharth1743/grid2op-openenv)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 ---
