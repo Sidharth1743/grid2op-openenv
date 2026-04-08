@@ -10,3 +10,4 @@ outputs/evals/*
 .env
 grid2op_env.egg-info
 submission
+docs

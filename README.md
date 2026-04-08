@@ -62,6 +62,13 @@ curl -X POST http://127.0.0.1:8000/reset \
 curl http://127.0.0.1:8000/tasks
 ```
 
+An empty `POST /reset {}` now defaults to:
+- `task_id=single_fault`
+- `scenario_mode=benchmark`
+- the first backend benchmark tier for that task (`single_fault_easy`)
+
+This default keeps public resets fast and matches the benchmark-oriented submission flow.
+
 ### 4. Run the baseline agent
 
 Create a `.env` file:
@@ -203,9 +210,11 @@ This makes the planner **topology-aware, contingency-aware, and cascade-aware**,
 **What makes it easy**: Single problem region, full topology intact, multiple redundant paths available.
 
 **Reward**:
-- `+(1 - ρ²)` per line per step — quadratic physics reward that penalises proximity to limits more sharply than linear alternatives
-- `−µ_line × n_switches` — switching cost that prevents reward hacking via excessive topology changes
-- Speed bonus on resolution, decaying with each step used
+- success bonus when all lines fall below the task threshold
+- `+0.05 × max(0, 1 - max_rho)` to reward lower peak loading
+- `−0.2 × overloaded_line_count` to penalise unresolved overloads
+- redispatch penalty proportional to total redispatch magnitude
+- `−5.0` terminal penalty if the episode reaches the time limit without clearing the target
 
 **Grader**: Score based on whether all lines reached below threshold and how many steps it took. Faster resolution = higher score.
 
@@ -337,51 +346,41 @@ reset()
       └─ planning_context() → graph topology, safe actions, LODF guidance
           └─ LLM proposes 3 candidate actions
               └─ /simulate → physics validation for each candidate
-                  └─ LLM selects safest validated action
+                  └─ deterministic ranking for Task 1, LLM final selection for Tasks 2–4
                       └─ step(action)
                           └─ /grader at episode end
 ```
 
 Key properties:
-- Candidates with `convergence_failed=True` are filtered before LLM final selection
+- Candidates with `convergence_failed=True` are filtered before final selection
 - Bridge lines (whose removal would island the network) are excluded from the candidate pool
 - Ramp limits are exposed in the prompt to prevent duplicate redispatch proposals after sanitisation
 - Context window is kept compact: only lines above 80%, active overflow countdowns, and stage-specific metadata are included
 
 ---
 
-## Baseline Scores
-
-Scores from the baseline agent (`Qwen2.5-14B-Instruct` via HuggingFace Inference API):
-
-| Task | Score | Episode Length |
-|---|---|---|
-| `single_fault` | 0.752 | 7 / 10 |
-| `n_minus_1` | 1.000 | 20 / 20 |
-| `cascade_prevent` | 0.546 | 18 / 30 |
-| `multi_stage_cascade` | ~0.15 | In progress |
-
-Scores are deterministic — same seed, same model, same score. The `/baseline` endpoint reproduces these results end-to-end.
-
----
 
 ## Repository Layout
 
 ```
 grid2op-openenv/
 ├── server/
-│   ├── app.py             # FastAPI + OpenEnv entrypoint, WebSocket, extra HTTP routes
-│   ├── environment.py     # Grid2Op adapter, reward shaping, planning support
-│   ├── tasks.py           # Reset logic and scenario injection for all four tasks
-│   └── graders.py         # Deterministic episode graders
-├── models.py              # GridAction, GridObservation, GridState, EpisodeStepLog
-├── client.py              # EnvClient (WebSocket)
-├── inference.py           # Baseline LLM agent
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml
-├── Dockerfile
-├── architecture/          # Per-task architecture notes
-└── docs/                  # Per-task research grounding and design notes
+│   ├── app.py             # FastAPI/OpenEnv entrypoint plus HTTP routes like /tasks, /grader, /simulate
+│   ├── environment.py     # Live Grid2Op adapter, reset defaults, reward shaping, planning support
+│   ├── tasks.py           # Task specs, benchmark tiers, dynamic scenario injection, reset replay logic
+│   ├── graders.py         # Deterministic per-task graders used by /grader
+│   ├── gradio_ui.py       # Optional OpenEnv web UI customization
+│   └── logging_utils.py   # Server logging setup
+├── models.py              # Pydantic models for actions, observations, state, logs, and baseline config
+├── client.py              # GridEnv client wrapper for reset/step/state/planning_context/simulate
+├── inference.py           # Submission baseline agent with Docker- or URL-based environment startup
+├── graph_analysis.py      # Topology analysis used in planning_context graph intelligence
+├── tests/                 # Pytest coverage for tasks, graders, parsing, and graph analysis
+├── openenv.yaml           # OpenEnv manifest (FastAPI app on port 8000)
+├── Dockerfile             # Root Docker image used for local builds and submission validation
+├── server/Dockerfile      # Server-focused Docker build variant
+├── architecture/          # System and per-task architecture notes
+└── docs/                  # Implementation notes and research-grounding writeups
 ```
 
 ---
