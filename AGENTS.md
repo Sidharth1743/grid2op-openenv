@@ -6,7 +6,7 @@ The package is rooted at the repository top level. Core models live in `models.p
 ## Build, Test, and Development Commands
 Use `uv` for local work.
 
-- `env UV_CACHE_DIR=/tmp/uv-cache uv run --no-dev server --port 7860` starts the FastAPI server declared in `openenv.yaml`.
+- `env UV_CACHE_DIR=/tmp/uv-cache uv run --no-dev server --port 8000` starts the FastAPI server declared in `openenv.yaml`.
 - `env UV_CACHE_DIR=/tmp/uv-cache uv run --no-dev grid2op-smoke --task-id single_fault --steps 1` runs a quick environment smoke test.
 - `env UV_CACHE_DIR=/tmp/uv-cache uv run --extra dev pytest tests/test_grid2op_env.py -q` runs the current pytest suite.
 - `docker build -t grid2op-env:local -f server/Dockerfile .` builds the local container image.
@@ -22,4 +22,4 @@ Tests use `pytest`. Add new coverage in `tests/test_grid2op_env.py` or split int
 Recent commits use short, direct subjects such as `docs updated` and `task 3 refining`. Keep commit titles imperative, lowercase is acceptable, and stay under roughly 60 characters. PRs should describe the affected task or subsystem, list validation commands run, and include baseline or API behavior changes when relevant. Add screenshots only for UI or HTTP response examples.
 
 ## Configuration & Runtime Notes
-`openenv.yaml` points to `server.app:app` on port `7860`. Keep API credentials in environment variables or `.env`; do not hardcode secrets. If you change server routes or environment logic, restart the server before rerunning `inference.py`.
+`openenv.yaml` points to `server.app:app` on port `8000`. Keep API credentials in environment variables or `.env`; do not hardcode secrets. If you change server routes or environment logic, restart the server before rerunning `inference.py`.

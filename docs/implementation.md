@@ -400,14 +400,14 @@ Start the environment server:
 ```bash
 cd /home/sidharth/Desktop/Openenv_modules/grid2op_env
 source .venv/bin/activate
-env UV_CACHE_DIR=/tmp/uv-cache uv run --active --no-dev server --port 7860
+env UV_CACHE_DIR=/tmp/uv-cache uv run --active --no-dev server --port 8000
 ```
 
 Quick checks:
 
 ```bash
-curl http://127.0.0.1:7860/health
-curl http://127.0.0.1:7860/tasks
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/tasks
 ```
 
 ### Option 2: local Docker workflow
@@ -422,7 +422,7 @@ docker build -t grid2op-env:local -f server/Dockerfile .
 Run:
 
 ```bash
-docker run --rm -p 7860:7860 grid2op-env:local
+docker run --rm -p 8000:8000 grid2op-env:local
 ```
 
 This workflow has already been verified. The image successfully built and pre-downloaded `l2rpn_case14_sandbox` at image build time.
@@ -435,7 +435,7 @@ Create [grid2op_env/.env](/home/sidharth/Desktop/Openenv_modules/grid2op_env/.en
 OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 OPENAI_API_KEY=EMPTY
 OPENAI_MODEL=cyankiwi/Qwen3.5-9B-AWQ-4bit
-GRID2OP_BASE_URL=http://127.0.0.1:7860
+GRID2OP_BASE_URL=http://127.0.0.1:8000
 ```
 
 Run the baseline:

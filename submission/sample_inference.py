@@ -1,4 +1,4 @@
-""
+"""
 Inference Script Example
 ===================================
 MANDATORY

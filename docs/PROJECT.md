@@ -210,7 +210,7 @@ grid2op_env/
     └── Dockerfile           ← Python 3.11 slim base.
                                Installs deps.
                                Pre-downloads l2rpn_case14_sandbox at build time.
-                               Starts uvicorn on port 7860.
+                               Starts uvicorn on port 8000.
 
 baseline/
 └── run_baseline.py        ← Ollama-compatible agent loop.

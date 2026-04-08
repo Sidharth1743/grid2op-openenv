@@ -55,10 +55,10 @@ TASKS: Dict[TaskId, TaskSpec] = {
         difficulty="hard",
         description=(
             "Three lines are disconnected and load is increased by 20%. Manage the "
-            "guaranteed three-stage cascade for 30 steps and preserve as much load "
+            "guaranteed three-stage cascade for 25 steps and preserve as much load "
             "as possible across stage boundaries."
         ),
-        max_steps=30,
+        max_steps=25,
     ),
 }
 

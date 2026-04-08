@@ -4,7 +4,7 @@ emoji: "⚡"
 colorFrom: blue
 colorTo: green
 sdk: docker
-app_port: 7860
+app_port: 8000
 pinned: false
 ---
 # Grid2Op OpenEnv Environment
@@ -47,19 +47,19 @@ uv pip install -e .
 ### 2. Run the server
 
 ```bash
-uv run server --port 7860
+uv run server --port 8000
 ```
 
-The server listens at `http://127.0.0.1:7860`.
+The server listens at `http://127.0.0.1:8000`.
 
 ### 3. Smoke test
 
 ```bash
-curl -X POST http://127.0.0.1:7860/reset \
+curl -X POST http://127.0.0.1:8000/reset \
   -H "Content-Type: application/json" \
   -d '{}'
 
-curl http://127.0.0.1:7860/tasks
+curl http://127.0.0.1:8000/tasks
 ```
 
 ### 4. Run the baseline agent
@@ -67,7 +67,7 @@ curl http://127.0.0.1:7860/tasks
 Create a `.env` file:
 
 ```env
-GRID2OP_BASE_URL=http://127.0.0.1:7860
+GRID2OP_BASE_URL=http://127.0.0.1:8000
 API_BASE_URL=https://router.huggingface.co/v1
 HF_TOKEN=hf_your_token
 MODEL_NAME=openai/gpt-oss-20b:groq
@@ -94,7 +94,7 @@ uv run --extra dev pytest tests/test_grid2op_env.py -q
 
 ```bash
 docker build -t grid2op-env:local .
-docker run --rm -p 7860:7860 grid2op-env:local
+docker run --rm -p 8000:8000 grid2op-env:local
 ```
 
 The image pre-downloads `l2rpn_case14_sandbox` at build time so runtime startup is instant.

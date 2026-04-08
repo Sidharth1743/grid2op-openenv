@@ -16,6 +16,7 @@ from typing import Any, Dict, Sequence
 import requests
 from dotenv import load_dotenv
 from openai import OpenAI
+from openenv.core.containers.runtime.providers import LocalDockerProvider
 
 from grid2op_env import BaselineRequest, BaselineScores, GridAction, GridEnv
 from grid2op_env.models import (
@@ -58,8 +59,8 @@ logger = logging.getLogger(__name__)
 TASK_SEED_OVERRIDES: dict[TaskId, int] = {
     "single_fault": 1,
     "n_minus_1": 4,
-    "cascade_prevent": 2,
-    "multi_stage_cascade": 4,
+    "cascade_prevent": 1,
+    "multi_stage_cascade": 3,
 }
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 HF_ROUTER_DEFAULT_MODEL = "openai/gpt-oss-20b:groq"
@@ -165,14 +166,38 @@ def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> No
     )
 
 
+def _docker_image_name() -> str | None:
+    return os.environ.get("LOCAL_IMAGE_NAME") or os.environ.get("IMAGE_NAME")
+
+
+def _create_sync_env_client(
+    preferred_base_url: str | None = None,
+) -> tuple[Any, str, str]:
+    image_name = _docker_image_name()
+    if image_name:
+        provider = LocalDockerProvider()
+        base_url = provider.start_container(image_name)
+        provider.wait_for_ready(base_url)
+        async_client = GridEnv(base_url=base_url, provider=provider)
+        return (
+            async_client.sync(),
+            base_url,
+            f"docker image {image_name}",
+        )
+
+    base_url = preferred_base_url or os.environ.get(
+        "GRID2OP_BASE_URL", DEFAULT_ENV_BASE_URL
+    )
+    return GridEnv(base_url=base_url).sync(), base_url, f"base_url {base_url}"
+
+
 def run_submission_episodes(task_ids: Sequence[TaskId] | None = None) -> dict[TaskId, float]:
-    base_url = os.environ.get("GRID2OP_BASE_URL", DEFAULT_ENV_BASE_URL)
     benchmark_name = os.environ.get("GRID2OP_BENCHMARK", DEFAULT_BENCHMARK_NAME)
     scenario_mode = os.environ.get("GRID2OP_SCENARIO_MODE", "benchmark")
     selected_task_ids = list(task_ids) if task_ids is not None else list(TASKS.keys())
     llm_config = BaselineConfig(
         model=_default_model_name(),
-        max_tokens=int(os.environ.get("MAX_TOKENS", "1200")),
+        max_tokens=int(os.environ.get("MAX_TOKENS", "300")),
         temperature=float(os.environ.get("TEMPERATURE", "0.7")),
         top_p=float(os.environ.get("TOP_P", "0.8")),
         presence_penalty=float(os.environ.get("PRESENCE_PENALTY", "1.5")),
@@ -187,10 +212,14 @@ def run_submission_episodes(task_ids: Sequence[TaskId] | None = None) -> dict[Ta
     client = _build_llm_client()
     task_scores: dict[TaskId, float] = {}
     try:
-        env_ctx = GridEnv(base_url=base_url).sync()
+        env_ctx, grader_base_url, env_source = _create_sync_env_client()
         env_ctx.connect()
     except Exception as exc:
-        logger.warning("Submission runner could not connect to environment base_url=%s error=%s", base_url, exc)
+        logger.warning(
+            "Submission runner could not connect to environment source=%s error=%s",
+            locals().get("env_source", "unknown"),
+            exc,
+        )
         for task_id in selected_task_ids:
             log_start(task=task_id, env=benchmark_name, model=llm_config.model)
             log_end(success=False, steps=0, score=0.01, rewards=[])
@@ -262,7 +291,7 @@ def run_submission_episodes(task_ids: Sequence[TaskId] | None = None) -> dict[Ta
 
                         state = env.state()
                         response = requests.post(
-                            f"{base_url}/grader",
+                            f"{grader_base_url}/grader",
                             json={
                                 "task_id": task_id,
                                 "episode_log": [
@@ -328,7 +357,8 @@ def run_baseline_suite(
         llm_config.seed_start,
     )
 
-    with GridEnv(base_url=base_url).sync() as env:
+    env_ctx, _, _ = _create_sync_env_client(preferred_base_url=base_url)
+    with env_ctx as env:
         task_metrics: Dict[TaskId, list[dict[str, Any]]] = {
             task_id: [] for task_id in selected_task_ids
         }
@@ -674,8 +704,12 @@ def choose_action_with_qwen(
             },
         }
 
-    if task_id == "single_fault":
-        selected_outcome = selectable_simulations[0]
+    if task_id in {"single_fault", "n_minus_1", "cascade_prevent"}:
+        selected_outcome = choose_best_simulation(
+            task_id=task_id,
+            observation=observation,
+            simulations=selectable_simulations,
+        )
         return selected_outcome.action, {
             "proposal_prompt": proposal_prompt,
             "proposal_raw_output": proposal_raw_output,
@@ -687,9 +721,10 @@ def choose_action_with_qwen(
             "final_prompt": "",
             "final_raw_output": "",
             "final_trace": {
-                "decision": "single_call_ranked_selection",
+                "decision": "deterministic_post_simulation_selection",
                 "reason": selected_outcome.trace.get("reason", ""),
                 "selected_candidate": selected_outcome.candidate_index,
+                "task_id": task_id,
             },
         }
 

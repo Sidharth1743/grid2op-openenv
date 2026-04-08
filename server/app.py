@@ -66,6 +66,11 @@ app = create_app(
 )
 
 
+@app.get("/health")
+def get_health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/tasks", response_model=TaskListResponse)
 def get_tasks() -> TaskListResponse:
     logger.info("Serving /tasks")
@@ -122,7 +127,7 @@ def post_simulate(payload: SimulationRequest) -> SimulationResponse:
     )
 
 
-def main(host: str = "0.0.0.0", port: int = 7860) -> None:
+def main(host: str = "0.0.0.0", port: int = 8000) -> None:
     import argparse
     import uvicorn
 
