@@ -146,7 +146,42 @@ Each step returns a `GridObservation`:
 | `done` | `bool` | Whether the episode has ended |
 | `metadata` | `dict` | Task-specific fields (stage index, available load ratio, etc.) |
 
+
+## 🕸️ Graph Intelligence
+
+One of the most important capabilities of this environment is the **graph intelligence layer** exposed through:
+
+```text
+POST /planning_context
+````
+
+This intelligence is computed from the **live server observation** inside `server/environment.py`, which internally calls `graph_analysis.py`.
+
+Instead of relying only on raw `rho` values, the planner also receives **structural grid insights**. This allows the agent to:
+
+* avoid unsafe topology edits
+* detect critical transmission corridors
+* reason about cascading risks
+* make topology-safe switching decisions
+
 ---
+
+## 🔍 What Graph Intelligence Includes
+
+The graph analysis currently provides:
+
+* **`bridge_lines`** → connected lines whose removal would split the active grid graph
+* **`safe_to_disconnect`** → connected lines that can be disconnected without fragmenting the grid
+* **`n_minus_1_critical_lines`** → structurally critical lines important for N-1 contingency reasoning
+* **`high_centrality_buses`** → buses with high betweenness centrality in the active network
+* **`islanded_clusters`** → bus clusters already separated from the main connected component
+* **`congestion_corridor`** → short summary of exporter buses, importer buses, and stressed lines
+* **`flow_clusters`** → exporter/importer bus rankings derived from `flow_bus_matrix`
+* **`stressed_lines`** → highest-`rho` connected lines with endpoint and overflow context
+* **`parallel_groups`** → transmission lines sharing the same terminal substations
+---
+
+This makes the planner **topology-aware, contingency-aware, and cascade-aware**, rather than purely overload-reactive.
 
 ## Tasks
 
