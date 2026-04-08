@@ -60,7 +60,7 @@ TASK_SEED_OVERRIDES: dict[TaskId, int] = {
     "single_fault": 1,
     "n_minus_1": 4,
     "cascade_prevent": 1,
-    "multi_stage_cascade": 3,
+    "multi_stage_cascade": 4,
 }
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 HF_ROUTER_DEFAULT_MODEL = "openai/gpt-oss-20b:groq"
@@ -704,7 +704,7 @@ def choose_action_with_qwen(
             },
         }
 
-    if task_id in {"single_fault", "n_minus_1"}:
+    if task_id == "single_fault":
         selected_outcome = choose_best_simulation(
             task_id=task_id,
             observation=observation,
