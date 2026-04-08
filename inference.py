@@ -275,7 +275,6 @@ def run_submission_episodes(task_ids: Sequence[TaskId] | None = None) -> dict[Ta
             task_scores[task_id] = (
                 round(mean(task_episode_scores), 6) if task_episode_scores else 0.0
             )
-
     return task_scores
 
 
