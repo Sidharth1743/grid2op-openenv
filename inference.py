@@ -62,6 +62,7 @@ TASK_SEED_OVERRIDES: dict[TaskId, int] = {
     "cascade_prevent": 1,
     "multi_stage_cascade": 4,
 }
+
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 HF_ROUTER_DEFAULT_MODEL = "openai/gpt-oss-20b:groq"
 DEFAULT_ENV_BASE_URL = "https://sidharth1743-grid2op-openenv.hf.space"
