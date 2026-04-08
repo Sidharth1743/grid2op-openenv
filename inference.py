@@ -63,7 +63,7 @@ TASK_SEED_OVERRIDES: dict[TaskId, int] = {
 }
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 HF_ROUTER_DEFAULT_MODEL = "openai/gpt-oss-20b:groq"
-DEFAULT_ENV_BASE_URL = "http://127.0.0.1:7860"
+DEFAULT_ENV_BASE_URL = "https://sidharth1743-grid2op-openenv.hf.space"
 DEFAULT_BENCHMARK_NAME = "grid2op_env"
 SUBMISSION_SUCCESS_SCORE_THRESHOLD = float(
     os.getenv("SUCCESS_SCORE_THRESHOLD", "0.1")
@@ -186,7 +186,18 @@ def run_submission_episodes(task_ids: Sequence[TaskId] | None = None) -> dict[Ta
     )
     client = _build_llm_client()
     task_scores: dict[TaskId, float] = {}
-    with GridEnv(base_url=base_url).sync() as env:
+    try:
+        env_ctx = GridEnv(base_url=base_url).sync()
+        env_ctx.connect()
+    except Exception as exc:
+        logger.warning("Submission runner could not connect to environment base_url=%s error=%s", base_url, exc)
+        for task_id in selected_task_ids:
+            log_start(task=task_id, env=benchmark_name, model=llm_config.model)
+            log_end(success=False, steps=0, score=0.01, rewards=[])
+            task_scores[task_id] = 0.01
+        return task_scores
+
+    with env_ctx as env:
         for task_id in selected_task_ids:
             task = TASKS[task_id]
             benchmark_tiers = benchmark_tiers_for_task(task_id)
