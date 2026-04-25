@@ -109,9 +109,9 @@ def inject_scenario_raw(
         if scenario_mode == "benchmark":
             effective_attempts = max(effective_attempts, 48)
         if int(env.n_line) >= 150:
-            effective_attempts = min(effective_attempts, 12)
+            effective_attempts = min(effective_attempts, 4)
         elif int(env.n_line) >= 80:
-            effective_attempts = min(effective_attempts, 20)
+            effective_attempts = min(effective_attempts, 8)
     if task_id == "multi_stage_cascade":
         effective_attempts = max(max_attempts, _available_time_series_count(env))
 
@@ -304,13 +304,13 @@ def _single_fault_search_config(env, scenario_mode: ScenarioMode) -> dict[str, A
     n_line = int(env.n_line)
     if n_line >= 150:
         return {
-            "max_warmup": 400 if scenario_mode == "benchmark" else 600,
+            "max_warmup": 120 if scenario_mode == "benchmark" else 240,
             "minimum_acceptable_fallback_rho": 0.72 if scenario_mode == "benchmark" else 0.78,
             "allow_benchmark_fallback": True,
         }
     if n_line >= 80:
         return {
-            "max_warmup": 800 if scenario_mode == "benchmark" else 1200,
+            "max_warmup": 300 if scenario_mode == "benchmark" else 600,
             "minimum_acceptable_fallback_rho": 0.76 if scenario_mode == "benchmark" else 0.80,
             "allow_benchmark_fallback": False,
         }
@@ -580,6 +580,18 @@ def _reset_single_fault(
             difficulty_level=difficulty_level,
         )
     }
+    logger.info(
+        "single_fault search config env_lines=%s stage=%s scenario_mode=%s benchmark_tier=%s attempt=%s time_series_id=%s max_warmup=%s fallback_rho=%.2f allow_benchmark_fallback=%s",
+        int(env.n_line),
+        stage,
+        scenario_mode,
+        benchmark_tier,
+        attempt + 1,
+        int(options["time serie id"]),
+        int(search_config["max_warmup"]),
+        minimum_acceptable_fallback_rho,
+        bool(search_config["allow_benchmark_fallback"]),
+    )
     obs = env.reset(seed=seed, options=options)
     max_warmup = int(search_config["max_warmup"])
     warmup_steps = 0

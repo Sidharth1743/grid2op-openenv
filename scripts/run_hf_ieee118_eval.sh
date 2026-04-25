@@ -66,7 +66,11 @@ uv run python ft_inference.py \
   --success-threshold ${SUCCESS_THRESHOLD} \
   --connect-timeout-s ${GRID_CONNECT_TIMEOUT_S} \
   --message-timeout-s ${GRID_MESSAGE_TIMEOUT_S} \
-  2>&1 | tee ${LOG_PATH}
+  2>&1 | tee ${LOG_PATH} || {
+    echo '===== server log ====='
+    tail -n 200 /tmp/grid2op_ieee118_eval_server.log || true
+    exit 1
+  }
 uv run python scripts/check_ft_inference_log.py ${LOG_PATH} | tee ${SUMMARY_PATH}
 EOF
 )
