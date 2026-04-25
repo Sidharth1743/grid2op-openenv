@@ -44,6 +44,10 @@ def _json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def _log_event(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, sort_keys=True), flush=True)
+
+
 def _simulation_map(simulations: Sequence[SimulationOutcome]) -> dict[str, SimulationOutcome]:
     return {action_key(outcome.action): outcome for outcome in simulations}
 
@@ -162,6 +166,15 @@ def collect_rollout_dataset(
             for episode_index in range(episodes_per_task):
                 seed = seed_start + episode_index
                 benchmark_tier = benchmark_tiers[episode_index % len(benchmark_tiers)]
+                _log_event(
+                    {
+                        "event": "episode_start",
+                        "task_id": task_id,
+                        "episode_index": episode_index,
+                        "seed": seed,
+                        "benchmark_tier": benchmark_tier,
+                    }
+                )
                 result = main_env.reset(
                     task_id=task_id,
                     seed=seed,
@@ -175,6 +188,19 @@ def collect_rollout_dataset(
                 stats["tasks"][task_id]["episodes"] += 1
 
                 while not result.done:
+                    current_step = int(state.step_count)
+                    current_max_rho = max((float(value) for value in result.observation.rho), default=0.0)
+                    _log_event(
+                        {
+                            "event": "step_start",
+                            "task_id": task_id,
+                            "seed": seed,
+                            "benchmark_tier": benchmark_tier,
+                            "step": current_step,
+                            "current_max_rho": round(current_max_rho, 6),
+                            "rows_written_so_far": stats["rows_written"],
+                        }
+                    )
                     planning_context = main_env.planning_context(state.episode_id)
                     candidate_actions = generate_legal_candidates(
                         task_id=task_id,
@@ -201,6 +227,15 @@ def collect_rollout_dataset(
                     ]
                     selectable = filter_selectable_simulations(simulations)
                     if not selectable:
+                        _log_event(
+                            {
+                                "event": "step_no_selectable",
+                                "task_id": task_id,
+                                "seed": seed,
+                                "step": current_step,
+                                "candidate_count": len(simulations),
+                            }
+                        )
                         break
 
                     policy_action, trace = choose_ft_action(
@@ -226,6 +261,17 @@ def collect_rollout_dataset(
                             shortlist_by_key[action_key(outcome.action)] = outcome
                             break
                     shortlisted = list(shortlist_by_key.values())
+                    _log_event(
+                        {
+                            "event": "step_shortlist",
+                            "task_id": task_id,
+                            "seed": seed,
+                            "step": current_step,
+                            "candidate_count": len(simulations),
+                            "shortlist_count": len(shortlisted),
+                            "policy_action": policy_action.model_dump(),
+                        }
+                    )
 
                     lookahead_values = {
                         action_key(outcome.action): _rollout_value(
@@ -244,6 +290,19 @@ def collect_rollout_dataset(
                     best_outcome = max(shortlisted, key=lambda outcome: lookahead_values[action_key(outcome.action)])
                     best_value = lookahead_values[action_key(best_outcome.action)]
                     policy_value = lookahead_values[action_key(policy_sim.action)]
+                    _log_event(
+                        {
+                            "event": "step_lookahead_scored",
+                            "task_id": task_id,
+                            "seed": seed,
+                            "step": current_step,
+                            "policy_action": policy_action.model_dump(),
+                            "policy_value": round(policy_value, 6),
+                            "best_action": best_outcome.action.model_dump(),
+                            "best_value": round(best_value, 6),
+                            "advantage": round(best_value - policy_value, 6),
+                        }
+                    )
 
                     result, state = _reset_and_replay(
                         main_env,
@@ -258,9 +317,28 @@ def collect_rollout_dataset(
                     if action_key(best_outcome.action) == action_key(policy_sim.action):
                         stats["skipped_policy_best"] += 1
                         stats["tasks"][task_id]["skipped_policy_best"] += 1
+                        _log_event(
+                            {
+                                "event": "step_skip_policy_best",
+                                "task_id": task_id,
+                                "seed": seed,
+                                "step": current_step,
+                                "policy_value": round(policy_value, 6),
+                            }
+                        )
                     elif best_value - policy_value < min_advantage:
                         stats["skipped_small_gap"] += 1
                         stats["tasks"][task_id]["skipped_small_gap"] += 1
+                        _log_event(
+                            {
+                                "event": "step_skip_small_gap",
+                                "task_id": task_id,
+                                "seed": seed,
+                                "step": current_step,
+                                "advantage": round(best_value - policy_value, 6),
+                                "min_advantage": min_advantage,
+                            }
+                        )
                     else:
                         prompt = build_sft_prompt(
                             task_id=task_id,
@@ -299,12 +377,38 @@ def collect_rollout_dataset(
                         handle.flush()
                         stats["rows_written"] += 1
                         stats["tasks"][task_id]["rows"] += 1
+                        _log_event(
+                            {
+                                "event": "row_written",
+                                "task_id": task_id,
+                                "seed": seed,
+                                "step": current_step,
+                                "rows_written": stats["rows_written"],
+                                "advantage": round(best_value - policy_value, 6),
+                                "selected_action": best_outcome.action.model_dump(),
+                                "policy_action": policy_action.model_dump(),
+                            }
+                        )
 
                     result = main_env.step(policy_action)
                     state = main_env.state()
                     history.append(policy_action)
 
+                _log_event(
+                    {
+                        "event": "episode_end",
+                        "task_id": task_id,
+                        "episode_index": episode_index,
+                        "seed": seed,
+                        "rows_written_so_far": stats["rows_written"],
+                        "task_rows_written": stats["tasks"][task_id]["rows"],
+                        "task_skipped_policy_best": stats["tasks"][task_id]["skipped_policy_best"],
+                        "task_skipped_small_gap": stats["tasks"][task_id]["skipped_small_gap"],
+                    }
+                )
+
     stats["wall_time_s"] = round(perf_counter() - started_at, 6)
+    _log_event({"event": "collection_complete", **stats})
     return stats
 
 

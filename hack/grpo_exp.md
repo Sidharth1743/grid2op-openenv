@@ -258,6 +258,169 @@ The analysis script used was:
 
 ## GRPO Results
 
+### Compact GRPO v1 on seed `0..4`
+
+Full benchmark result for:
+- adapter: `outputs/models/grid2op-qwen3-4b-grpo-compact-v1`
+- log: `outputs/logs/grpo_compact_v1_seed0_5eps.log`
+
+Scores:
+- `cascade_prevent`: `0.990`
+- `multi_stage_cascade`: `0.9156444`
+- `n_minus_1`: `0.990`
+- `single_fault`: `0.856`
+- failures: `0`
+- safety pass: `true`
+
+Task-level action counts:
+- `cascade_prevent`: `disconnect_line=10`, `do_nothing=132`, `reconnect_line=8`
+- `multi_stage_cascade`: `disconnect_line=7`, `do_nothing=126`, `reconnect_line=17`
+- `n_minus_1`: `do_nothing=15`, `reconnect_line=5`, `redispatch=80`
+- `single_fault`: `do_nothing=2`, `redispatch=44`
+
+Interpretation:
+- the GRPO adapter stayed safe
+- but behavior was essentially unchanged from SFT
+- this was not a meaningful policy improvement
+
+### Compact GRPO v1 on seed `100..102`
+
+Full benchmark result for:
+- adapter: `outputs/models/grid2op-qwen3-4b-grpo-compact-v1`
+- log: `outputs/logs/grpo_compact_v1_seed100_3eps.log`
+
+Scores:
+- `cascade_prevent`: `0.990`
+- `multi_stage_cascade`: `0.9069863`
+- `n_minus_1`: `0.9222223`
+- `single_fault`: `0.7833333`
+- failures: `0`
+- safety pass: `true`
+
+Interpretation:
+- `cascade_prevent`: unchanged
+- `multi_stage_cascade`: unchanged
+- `n_minus_1`: unchanged
+- `single_fault`: worse than SFT
+
+Conclusion from the original GRPO design:
+- the verifier-GRPO pipeline worked technically
+- but the policy did not improve over SFT
+- on `single_fault`, it regressed slightly on unseen seeds
+
+## Hugging Face Jobs Pipeline
+
+Because local hardware was limited, the GRPO pipeline was moved to Hugging Face Jobs.
+
+What was proven in cloud:
+- private HF bucket storage for datasets, adapters, checkpoints, logs
+- HF Jobs training launch from Python API
+- HF Jobs evaluation with the OpenEnv server started inside the same job
+- W&B tracking for cloud GRPO runs
+
+Operational assets:
+- bucket: `hf://buckets/Sidharth1743/grid2op-finals`
+- training adapter source: `/mnt/models/grid2op-qwen3-4b-sft-3k-v1`
+- eval logs: `/mnt/evals/...`
+- GRPO outputs: `/mnt/runs/...`
+
+Important infra result:
+- the cloud pipeline was not the blocker
+- training and evaluation both worked end-to-end
+
+## HF Jobs Multistage GRPO Run
+
+Run:
+- `grid2op-qwen3-4b-grpo-multistage-v1`
+- W&B: `https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0`
+
+This was a focused `multi_stage_cascade` run using the filtered informative dataset and the relative multistage reward.
+
+Observed outcome:
+- run completed cleanly
+- checkpoints and artifacts synced
+- no cloud instability blocked progress
+
+## HF Jobs Evaluation Result
+
+Focused multistage eval:
+- job id: `69eca7f1d70108f37acde524`
+- summary path:
+  - `/mnt/evals/grid2op-qwen3-4b-grpo-multistage-v1_seed0_5eps.summary.json`
+
+Result:
+- `multi_stage_cascade mean_score = 0.9156444`
+- failures: `0`
+- safety pass: `true`
+- action counts:
+  - `disconnect_line=7`
+  - `do_nothing=126`
+  - `reconnect_line=17`
+
+Interpretation:
+- this exactly matched the earlier SFT baseline behavior
+- the focused HF Jobs GRPO run still did not improve policy quality
+
+## Why The Original GRPO Path Stayed Flat
+
+The main issue was not instability. The issue was lack of real learning headroom.
+
+What we learned:
+- the dataset already encoded the best safe one-step verified choice
+- SFT already matched that choice distribution
+- GRPO was training on offline one-step candidate selection, not long-horizon environment improvement
+- reward variance for a strong SFT policy was too small
+- `num_generations=2` was too weak for meaningful relative ranking on such a narrow action space
+
+This means the original GRPO setup was mostly a policy-preservation setup, not a policy-improvement setup.
+
+## Rollout-Based Follow-Up
+
+Because the original offline verifier rows gave almost no headroom, a new path was added:
+- collect hard `multi_stage_cascade` states from the current policy’s own rollouts
+- keep only states where a verified alternative beats the current policy under short-horizon rollout value
+- train GRPO on those rollout-derived rows
+
+New scripts added:
+- `scripts/collect_rollout_grpo_dataset.py`
+- `scripts/run_hf_collect_rollout_grpo.sh`
+- `scripts/run_hf_grpo_multistage_rollout_real.sh`
+- `scripts/run_hf_ft_eval.sh`
+
+Key design change:
+- when present, `lookahead_value` is used as the training objective instead of plain one-step `simulated_reward`
+
+Why this follow-up is more honest:
+- it does not assume the teacher rows still contain unexplored improvement
+- it trains only on states where the current policy is actually suboptimal
+- it scores candidate first actions by short-horizon rollout value, which is closer to the true multi-stage objective
+
+Current status:
+- rollout-based collection pipeline was implemented
+- cloud-only launcher scripts were added
+- a minimal parallel collector run was also launched to test whether the new path can produce useful hard rows faster
+- richer collector logging was added so cloud jobs now print:
+  - episode start/end
+  - step start
+  - shortlist size
+  - lookahead-scored policy value vs best value
+  - whether a row was written or skipped
+- this path is still experimental and has not yet produced a confirmed policy gain
+
+## Final Position Right Now
+
+What is proven:
+- SFT is the strongest stable model so far
+- GRPO infrastructure works locally and in cloud
+- GRPO can preserve safety
+
+What is not yet proven:
+- that GRPO improves the model over SFT on this benchmark
+
+Honest conclusion at this point:
+- submission model should remain SFT unless the rollout-based GRPO path produces a real evaluated gain
+- GRPO should be presented as a serious research and engineering effort, not as a claimed improvement without evidence
+
 ### GRPO seed `0..4`
 
 Evaluation log:
