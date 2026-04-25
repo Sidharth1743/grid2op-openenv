@@ -14,9 +14,11 @@ from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
 try:
     from scripts.collect_teacher_dataset import build_sft_prompt
     from scripts.diagnose_action_space import _reset_and_replay
+    from scripts.task_objectives import objective_completion_score
 except ImportError:
     from collect_teacher_dataset import build_sft_prompt
     from diagnose_action_space import _reset_and_replay
+    from task_objectives import objective_completion_score
 
 try:
     from ft_inference import (
@@ -62,6 +64,19 @@ def _serialize_with_lookahead(
         payload["lookahead_value"] = round(float(lookahead_values.get(action_key(outcome.action), 0.0)), 6)
         rows.append(payload)
     return rows
+
+
+def _observation_summary_for_rollout(task_id: TaskId, step: int, observation: Any) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "step": step,
+        "max_rho": max((float(value) for value in observation.rho), default=0.0),
+        "disconnected_lines": [
+            line_id for line_id, status in enumerate(observation.line_status) if not bool(status)
+        ],
+        "timestep_overflow": [int(value) for value in observation.timestep_overflow],
+        "sensitivity_guidance": observation.sensitivity_guidance[:5],
+    }
 
 
 def _rollout_value(
@@ -261,6 +276,11 @@ def collect_rollout_dataset(
                             shortlist_by_key[action_key(outcome.action)] = outcome
                             break
                     shortlisted = list(shortlist_by_key.values())
+                    observation_summary = _observation_summary_for_rollout(
+                        task_id=task_id,
+                        step=current_step,
+                        observation=result.observation,
+                    )
                     _log_event(
                         {
                             "event": "step_shortlist",
@@ -287,9 +307,34 @@ def collect_rollout_dataset(
                         )
                         for outcome in shortlisted
                     }
-                    best_outcome = max(shortlisted, key=lambda outcome: lookahead_values[action_key(outcome.action)])
-                    best_value = lookahead_values[action_key(best_outcome.action)]
-                    policy_value = lookahead_values[action_key(policy_sim.action)]
+                    serialized_shortlisted = _serialize_with_lookahead(shortlisted, lookahead_values)
+                    best_payload = max(
+                        serialized_shortlisted,
+                        key=lambda payload: objective_completion_score(
+                            task_id=task_id,
+                            simulation=payload,
+                            simulations=serialized_shortlisted,
+                            observation_summary=observation_summary,
+                        ),
+                    )
+                    best_outcome = shortlist_by_key[action_key(GridAction.model_validate(best_payload["action"]))]
+                    policy_payload = next(
+                        payload
+                        for payload in serialized_shortlisted
+                        if action_key(GridAction.model_validate(payload["action"])) == action_key(policy_sim.action)
+                    )
+                    best_value = objective_completion_score(
+                        task_id=task_id,
+                        simulation=best_payload,
+                        simulations=serialized_shortlisted,
+                        observation_summary=observation_summary,
+                    )
+                    policy_value = objective_completion_score(
+                        task_id=task_id,
+                        simulation=policy_payload,
+                        simulations=serialized_shortlisted,
+                        observation_summary=observation_summary,
+                    )
                     _log_event(
                         {
                             "event": "step_lookahead_scored",
@@ -359,11 +404,8 @@ def collect_rollout_dataset(
                                 "benchmark_tier": benchmark_tier,
                                 "seed": seed,
                                 "step": state.step_count,
-                                "observation_summary": {
-                                    "max_rho": max((float(value) for value in result.observation.rho), default=0.0),
-                                    "sensitivity_guidance": result.observation.sensitivity_guidance[:5],
-                                },
-                                "simulations": _serialize_with_lookahead(shortlisted, lookahead_values),
+                                "observation_summary": observation_summary,
+                                "simulations": serialized_shortlisted,
                                 "selected_action": best_outcome.action.model_dump(),
                                 "policy_action": policy_action.model_dump(),
                                 "policy_action_lookahead_value": round(policy_value, 6),

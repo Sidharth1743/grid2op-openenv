@@ -21,12 +21,14 @@ try:
         resolve_precision,
         selected_action_type,
     )
+    from scripts.task_objectives import objective_completion_score, objective_value
 except ModuleNotFoundError:
     from train_sft import (  # type: ignore[no-redef]
         QWEN_CHATML_TRAINING_TEMPLATE,
         resolve_precision,
         selected_action_type,
     )
+    from task_objectives import objective_completion_score, objective_value  # type: ignore[no-redef]
 
 
 DEFAULT_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
@@ -147,12 +149,6 @@ def _simulation_action_type(simulation: dict[str, Any]) -> str:
     return selected_action_type(simulation.get("action", {}))
 
 
-def _objective_value(simulation: dict[str, Any]) -> float:
-    if simulation.get("lookahead_value") is not None:
-        return float(simulation.get("lookahead_value", 0.0))
-    return float(simulation.get("simulated_reward", 0.0))
-
-
 def _safe_simulations(simulations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         simulation
@@ -176,14 +172,14 @@ def _best_safe_reward(simulations: list[dict[str, Any]]) -> float | None:
     safe = _safe_simulations(simulations)
     if not safe:
         return None
-    return max(_objective_value(simulation) for simulation in safe)
+    return max(objective_value(simulation) for simulation in safe)
 
 
 def _best_safe_simulation(simulations: list[dict[str, Any]]) -> dict[str, Any] | None:
     safe = _safe_simulations(simulations)
     if not safe:
         return None
-    return max(safe, key=_objective_value)
+    return max(safe, key=objective_value)
 
 
 def _best_safe_rho(simulations: list[dict[str, Any]]) -> float | None:
@@ -220,11 +216,11 @@ def _normalized_gap_to_best(selected_reward: float, best_reward: float, noop_rew
 
 
 def _stage_progress_proxy(simulation: dict[str, Any], noop_simulation: dict[str, Any] | None) -> float:
-    selected_reward = _objective_value(simulation)
+    selected_reward = objective_value(simulation)
     selected_rho = float(simulation.get("max_rho", 999.0))
     progress = 0.0
     if noop_simulation is not None:
-        noop_reward = _objective_value(noop_simulation)
+        noop_reward = objective_value(noop_simulation)
         noop_rho = float(noop_simulation.get("max_rho", 999.0))
         progress += 0.7 * _normalized_reward_delta(selected_reward, noop_reward)
         progress += 0.3 * max(-1.0, min(1.0, noop_rho - selected_rho))
@@ -271,7 +267,7 @@ def _compact_candidate_summary(simulations: list[dict[str, Any]]) -> list[dict[s
                 and not bool(simulation.get("exceptions")),
                 "max_rho": round(float(simulation.get("max_rho", 999.0)), 6),
                 "reward": round(float(simulation.get("simulated_reward", 0.0)), 6),
-                "objective_value": round(_objective_value(simulation), 6),
+                "objective_value": round(objective_value(simulation), 6),
                 "overloaded": simulation.get("overloaded_line_ids") or [],
                 "disconnected": simulation.get("disconnected_lines") or [],
                 "max_overflow_countdown": max_overflow,
@@ -461,14 +457,14 @@ def task_objective_reward(
             max_overflow = max((int(value) for value in overflow), default=0) if isinstance(overflow, list) else 0
             reward += 1.0 if max_overflow == 0 else -1.0
             reward += 0.5 if max_rho < 1.0 else -0.5
-            if best_reward is not None and _objective_value(simulation) >= best_reward - 1e-3:
+            if best_reward is not None and objective_value(simulation) >= best_reward - 1e-3:
                 reward += 0.5
         elif current_task == "multi_stage_cascade":
             reward += 1.0 if not simulation.get("done") else -1.0
             reward += 0.5 if max_rho < 1.0 else -0.5
             if action_kind in {"reconnect_line", "disconnect_line", "redispatch"}:
                 reward += 0.2
-            if best_reward is not None and _objective_value(simulation) >= best_reward - 1e-3:
+            if best_reward is not None and objective_value(simulation) >= best_reward - 1e-3:
                 reward += 0.5
         else:
             if best_rho is not None and max_rho <= best_rho + 1e-4:
@@ -525,18 +521,37 @@ def multistage_relative_reward(
         if action is None or simulation is None or error is not None:
             rewards.append(0.0)
             continue
+        selected_score = objective_completion_score(
+            task_id=current_task,
+            simulation=simulation,
+            simulations=simulations,
+            observation_summary=obs_summary,
+        )
         noop_sim = _noop_simulation(simulations)
         best_sim = _best_safe_simulation(simulations)
         if best_sim is None:
             rewards.append(-1.0)
             continue
-        selected_reward = _objective_value(simulation)
-        best_reward = _objective_value(best_sim)
-        noop_reward = _objective_value(noop_sim) if noop_sim is not None else None
-        relative_to_noop = (
-            0.0 if noop_reward is None else _normalized_reward_delta(selected_reward, noop_reward)
+        best_score = objective_completion_score(
+            task_id=current_task,
+            simulation=best_sim,
+            simulations=simulations,
+            observation_summary=obs_summary,
         )
-        closeness_to_best = _normalized_gap_to_best(selected_reward, best_reward, noop_reward)
+        noop_score = (
+            objective_completion_score(
+                task_id=current_task,
+                simulation=noop_sim,
+                simulations=simulations,
+                observation_summary=obs_summary,
+            )
+            if noop_sim is not None
+            else None
+        )
+        relative_to_noop = (
+            0.0 if noop_score is None else _normalized_reward_delta(selected_score, noop_score)
+        )
+        closeness_to_best = _normalized_gap_to_best(selected_score, best_score, noop_score)
         progress_proxy = _stage_progress_proxy(simulation, noop_sim)
         load_ratio, island_ratio = _current_multistage_state_metrics(obs_summary)
         current_state_bonus = 0.0
@@ -544,7 +559,7 @@ def multistage_relative_reward(
             current_state_bonus += 0.1 * max(0.0, min(1.0, load_ratio))
         if island_ratio is not None:
             current_state_bonus += 0.05 * max(0.0, min(1.0, island_ratio))
-        reward = (0.50 * relative_to_noop) + (0.35 * closeness_to_best) + (0.15 * progress_proxy) + current_state_bonus
+        reward = (0.55 * relative_to_noop) + (0.35 * closeness_to_best) + (0.10 * progress_proxy) + current_state_bonus
         rewards.append(max(-1.0, min(1.0, reward)))
     return rewards
 
@@ -773,17 +788,32 @@ class MultiStageEvalCallback(TrainerCallback):
                 counters["safe_action"] += 1
             action_kind = _simulation_action_type(simulation)
             counters[f"action_{action_kind}"] += 1
-            selected_reward = _objective_value(simulation)
+            selected_reward = objective_completion_score(
+                task_id=str(row["task_id"]),
+                simulation=simulation,
+                simulations=row["verified_simulation_results"],
+                observation_summary=row["observation_summary"],
+            )
             selected_rho = float(simulation.get("max_rho", 999.0))
             selected_rewards.append(selected_reward)
             selected_rhos.append(selected_rho)
             noop_sim = _noop_simulation(row["verified_simulation_results"])
             best_sim = _best_safe_simulation(row["verified_simulation_results"])
             if noop_sim is not None:
-                noop_reward = _objective_value(noop_sim)
+                noop_reward = objective_completion_score(
+                    task_id=str(row["task_id"]),
+                    simulation=noop_sim,
+                    simulations=row["verified_simulation_results"],
+                    observation_summary=row["observation_summary"],
+                )
                 noop_deltas.append(_normalized_reward_delta(selected_reward, noop_reward))
             if best_sim is not None:
-                best_reward = _objective_value(best_sim)
+                best_reward = objective_completion_score(
+                    task_id=str(row["task_id"]),
+                    simulation=best_sim,
+                    simulations=row["verified_simulation_results"],
+                    observation_summary=row["observation_summary"],
+                )
                 counters["selected_best"] += int(abs(best_reward - selected_reward) <= 1e-5)
                 best_gaps.append(best_reward - selected_reward)
         total = max(1, len(self.eval_rows))
