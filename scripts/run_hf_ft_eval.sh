@@ -26,8 +26,15 @@ git clone --depth 1 --branch ${BRANCH_NAME} https://github.com/Sidharth1743/grid
 mkdir -p ${LOG_DIR} && \
 cd /workspace && \
 uv sync --frozen --no-dev && \
-uv pip install torch datasets transformers peft accelerate bitsandbytes && \
+uv pip install torch datasets transformers trl peft accelerate bitsandbytes fastapi uvicorn && \
+uv run server --host 127.0.0.1 --port 8018 > /tmp/grid2op_eval_server.log 2>&1 & \
+for i in \$(seq 1 60); do \
+  if curl -fsS http://127.0.0.1:8018/health >/dev/null; then break; fi; \
+  sleep 2; \
+done && \
+curl -fsS http://127.0.0.1:8018/health >/dev/null || (cat /tmp/grid2op_eval_server.log && exit 1) && \
 uv run python ft_inference.py \
+  --base-url http://127.0.0.1:8018 \
   --model ${BASE_MODEL} \
   --adapter ${ADAPTER_PATH} \
   --task-id ${TASK_IDS} \
