@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import traceback
 from pathlib import Path
 from time import perf_counter
@@ -29,6 +30,8 @@ from scripts.train_sft import QWEN_CHATML_TRAINING_TEMPLATE, resolve_precision
 DEFAULT_BASE_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 DEFAULT_ADAPTER = "outputs/models/grid2op-qwen3-4b-sft-v1"
 DEFAULT_BASE_URL = "http://127.0.0.1:8018"
+DEFAULT_MESSAGE_TIMEOUT_S = float(os.environ.get("GRID2OP_MESSAGE_TIMEOUT_S", "180"))
+DEFAULT_CONNECT_TIMEOUT_S = float(os.environ.get("GRID2OP_CONNECT_TIMEOUT_S", "30"))
 
 
 def _json_dumps(payload: Any) -> str:
@@ -436,7 +439,11 @@ def run_ft_episodes(args: argparse.Namespace) -> dict[str, Any]:
     stats: dict[str, Any] = {"episodes": 0, "tasks": {}}
     started_at = perf_counter()
 
-    with GridEnv(base_url=args.base_url).sync() as env:
+    with GridEnv(
+        base_url=args.base_url,
+        connect_timeout_s=args.connect_timeout_s,
+        message_timeout_s=args.message_timeout_s,
+    ).sync() as env:
         for task_id in selected_task_ids:
             task = TASKS[task_id]
             task_scores: list[float] = []
@@ -567,6 +574,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attn-implementation", default=None)
     parser.add_argument("--success-threshold", type=float, default=0.1)
     parser.add_argument("--verbose-trace", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--connect-timeout-s", type=float, default=DEFAULT_CONNECT_TIMEOUT_S)
+    parser.add_argument("--message-timeout-s", type=float, default=DEFAULT_MESSAGE_TIMEOUT_S)
     return parser.parse_args()
 
 

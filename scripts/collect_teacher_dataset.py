@@ -33,6 +33,8 @@ DEFAULT_TEACHER_API_BASE_URL = os.environ.get(
     "GRID2OP_TEACHER_API_BASE_URL",
     os.environ.get("API_BASE_URL", DEFAULT_GROQ_BASE_URL),
 )
+DEFAULT_GRID_MESSAGE_TIMEOUT_S = float(os.environ.get("GRID2OP_MESSAGE_TIMEOUT_S", "180"))
+DEFAULT_GRID_CONNECT_TIMEOUT_S = float(os.environ.get("GRID2OP_CONNECT_TIMEOUT_S", "30"))
 
 
 def _load_env() -> None:
@@ -518,6 +520,8 @@ def collect_teacher_dataset(
     model: str,
     max_tokens: int,
     temperature: float,
+    connect_timeout_s: float,
+    message_timeout_s: float,
 ) -> dict[str, Any]:
     llm_config = BaselineConfig(
         model=model,
@@ -551,7 +555,11 @@ def collect_teacher_dataset(
     }
 
     started_at = perf_counter()
-    with GridEnv(base_url=base_url).sync() as env, output_path.open(
+    with GridEnv(
+        base_url=base_url,
+        connect_timeout_s=connect_timeout_s,
+        message_timeout_s=message_timeout_s,
+    ).sync() as env, output_path.open(
         "a", encoding="utf-8"
     ) as handle:
         for task_id in task_ids:
@@ -777,6 +785,8 @@ def main() -> None:
     parser.add_argument(
         "--temperature", type=float, default=float(os.environ.get("TEMPERATURE", "0.2"))
     )
+    parser.add_argument("--connect-timeout-s", type=float, default=DEFAULT_GRID_CONNECT_TIMEOUT_S)
+    parser.add_argument("--message-timeout-s", type=float, default=DEFAULT_GRID_MESSAGE_TIMEOUT_S)
     args = parser.parse_args()
 
     os.environ["API_BASE_URL"] = args.teacher_api_base_url
@@ -793,6 +803,8 @@ def main() -> None:
         model=args.model,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
+        connect_timeout_s=args.connect_timeout_s,
+        message_timeout_s=args.message_timeout_s,
     )
     print(json.dumps(stats, indent=2, sort_keys=True))
 

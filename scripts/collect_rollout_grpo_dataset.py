@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Sequence
@@ -10,6 +11,9 @@ from grid2op_env import GridAction, GridEnv
 from grid2op_env.inference import SimulationOutcome, filter_selectable_simulations, serialize_simulation_outcome
 from grid2op_env.models import TaskId
 from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
+
+DEFAULT_GRID_MESSAGE_TIMEOUT_S = float(os.environ.get("GRID2OP_MESSAGE_TIMEOUT_S", "180"))
+DEFAULT_GRID_CONNECT_TIMEOUT_S = float(os.environ.get("GRID2OP_CONNECT_TIMEOUT_S", "30"))
 
 try:
     from scripts.collect_teacher_dataset import build_sft_prompt
@@ -144,6 +148,8 @@ def collect_rollout_dataset(
     use_4bit: bool,
     max_new_tokens: int,
     attn_implementation: str | None,
+    connect_timeout_s: float,
+    message_timeout_s: float,
 ) -> dict[str, Any]:
     policy = FineTunedPolicy(
         base_model=model,
@@ -167,7 +173,11 @@ def collect_rollout_dataset(
     }
     started_at = perf_counter()
 
-    with GridEnv(base_url=base_url).sync() as main_env, output_path.open(
+    with GridEnv(
+        base_url=base_url,
+        connect_timeout_s=connect_timeout_s,
+        message_timeout_s=message_timeout_s,
+    ).sync() as main_env, output_path.open(
         "a", encoding="utf-8"
     ) as handle:
         for task_id in task_ids:
@@ -473,6 +483,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-4bit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--attn-implementation", default=None)
+    parser.add_argument("--connect-timeout-s", type=float, default=DEFAULT_GRID_CONNECT_TIMEOUT_S)
+    parser.add_argument("--message-timeout-s", type=float, default=DEFAULT_GRID_MESSAGE_TIMEOUT_S)
     return parser.parse_args()
 
 
@@ -494,6 +506,8 @@ def main() -> None:
         use_4bit=args.use_4bit,
         max_new_tokens=args.max_new_tokens,
         attn_implementation=args.attn_implementation,
+        connect_timeout_s=args.connect_timeout_s,
+        message_timeout_s=args.message_timeout_s,
     )
     print(json.dumps(stats, indent=2, sort_keys=True))
 
