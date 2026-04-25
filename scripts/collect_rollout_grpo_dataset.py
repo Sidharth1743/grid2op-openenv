@@ -148,11 +148,9 @@ def collect_rollout_dataset(
     }
     started_at = perf_counter()
 
-    with (
-        GridEnv(base_url=base_url).sync() as main_env,
-        GridEnv(base_url=base_url).sync() as replay_env,
-        output_path.open("a", encoding="utf-8") as handle,
-    ):
+    with GridEnv(base_url=base_url).sync() as main_env, output_path.open(
+        "a", encoding="utf-8"
+    ) as handle:
         for task_id in task_ids:
             benchmark_tiers = benchmark_tiers_for_task(task_id)
             stats["tasks"][task_id] = {
@@ -231,7 +229,7 @@ def collect_rollout_dataset(
 
                     lookahead_values = {
                         action_key(outcome.action): _rollout_value(
-                            replay_env,
+                            main_env,
                             policy=policy,
                             task_id=task_id,
                             seed=seed,
@@ -246,6 +244,16 @@ def collect_rollout_dataset(
                     best_outcome = max(shortlisted, key=lambda outcome: lookahead_values[action_key(outcome.action)])
                     best_value = lookahead_values[action_key(best_outcome.action)]
                     policy_value = lookahead_values[action_key(policy_sim.action)]
+
+                    result, state = _reset_and_replay(
+                        main_env,
+                        task_id=task_id,
+                        seed=seed,
+                        benchmark_tier=benchmark_tier,
+                        pre_actions=history,
+                    )
+                    if result.done:
+                        break
 
                     if action_key(best_outcome.action) == action_key(policy_sim.action):
                         stats["skipped_policy_best"] += 1
