@@ -35,6 +35,13 @@ mkdir -p "$(dirname "${OUTPUT_PATH}")"
 cd /workspace
 uv sync --frozen --no-dev
 uv pip install torch datasets transformers trl peft accelerate bitsandbytes fastapi uvicorn gradio pandas "vllm>=0.19.0"
+python - <<'PY'
+import grid2op
+
+env = grid2op.make("${GRID2OP_ENV_NAME}")
+print({"preloaded_env": "${GRID2OP_ENV_NAME}", "n_line": int(env.n_line), "n_gen": int(env.n_gen)})
+env.close()
+PY
 export API_KEY="EMPTY"
 export GRID2OP_TEACHER_MODEL="${TEACHER_MODEL}"
 export GRID2OP_TEACHER_API_BASE_URL="http://127.0.0.1:${TEACHER_PORT}/v1"

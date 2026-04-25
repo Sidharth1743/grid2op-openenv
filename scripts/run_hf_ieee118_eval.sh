@@ -37,6 +37,13 @@ mkdir -p ${LOG_DIR}
 cd /workspace
 uv sync --frozen --no-dev
 uv pip install torch datasets transformers trl peft accelerate bitsandbytes fastapi uvicorn gradio pandas
+python - <<'PY'
+import grid2op
+
+env = grid2op.make("${GRID2OP_ENV_NAME}")
+print({"preloaded_env": "${GRID2OP_ENV_NAME}", "n_line": int(env.n_line), "n_gen": int(env.n_gen)})
+env.close()
+PY
 uv run python -m grid2op_env.server.app --host 127.0.0.1 --port 8018 > /tmp/grid2op_ieee118_eval_server.log 2>&1 &
 SERVER_PID=\$!
 echo "server pid: \$SERVER_PID"
