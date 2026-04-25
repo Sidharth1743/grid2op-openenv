@@ -52,6 +52,8 @@ This repo includes:
 - SFT / inference pipeline: [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)
 - Verified-candidate evaluation: [ft_inference.py](/home/sidharth/Desktop/grid2op-openenv/ft_inference.py)
 - GRPO trainer: [train_grpo_verifier.py](/home/sidharth/Desktop/grid2op-openenv/scripts/train_grpo_verifier.py)
+- SFT training workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
+- Completed HF GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0
 - Dataset and experiment notes:
   - [evaluation.md](/home/sidharth/Desktop/grid2op-openenv/hack/evaluation.md)
   - [grpo_exp.md](/home/sidharth/Desktop/grid2op-openenv/hack/grpo_exp.md)
@@ -66,6 +68,17 @@ This repo includes:
 - Focused multistage GRPO plot: [multistage_dapo_focus.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
 - Project-level tradeoff view: [performance_vs_effort.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/performance_vs_effort.png)
 - Plot notes: [plots.md](/home/sidharth/Desktop/grid2op-openenv/hack/plots.md)
+
+### Training Plot Exports
+
+The repository also includes exported training curves under [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots):
+
+- [sft_train_loss.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
+- [sft_eval_loss.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
+- [sft_train_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_entropy.png)
+- [sft_eval_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_entropy.png)
+
+These are the committed image artifacts that back the SFT training story in addition to the W&B workspace.
 
 ## Final Model Choice
 
@@ -127,6 +140,19 @@ Most important change:
 
 - the base model often failed on the hard tasks because it produced invalid or unverified actions
 - the SFT model learned the environment-specific action protocol and completed the evaluated episodes safely
+
+## Training Evidence
+
+For reviewers who want the training trace directly:
+
+- W&B SFT workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
+- committed plot exports: [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots)
+
+Key exported plots:
+
+![SFT Train Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
+
+![SFT Eval Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
 
 ## How The System Works
 
