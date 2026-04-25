@@ -35,7 +35,7 @@ mkdir -p "$(dirname "${OUTPUT_PATH}")"
 cd /workspace
 uv sync --frozen --no-dev
 uv pip install torch datasets transformers trl peft accelerate bitsandbytes fastapi uvicorn gradio pandas "vllm>=0.19.0"
-python - <<'PY'
+uv run python - <<'PY'
 import grid2op
 
 env = grid2op.make("${GRID2OP_ENV_NAME}")
