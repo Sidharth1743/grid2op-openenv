@@ -53,7 +53,8 @@ This repo includes:
 - Verified-candidate evaluation: [ft_inference.py](/home/sidharth/Desktop/grid2op-openenv/ft_inference.py)
 - GRPO trainer: [train_grpo_verifier.py](/home/sidharth/Desktop/grid2op-openenv/scripts/train_grpo_verifier.py)
 - SFT training workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
-- Completed HF GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0
+- Completed compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
+- Focused HF GRPO run with DAPO loss: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
 - Dataset and experiment notes:
   - [evaluation.md](/home/sidharth/Desktop/grid2op-openenv/hack/evaluation.md)
   - [grpo_exp.md](/home/sidharth/Desktop/grid2op-openenv/hack/grpo_exp.md)
@@ -79,6 +80,8 @@ The repository also includes exported training curves under [training_plots](/ho
 - [sft_eval_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_entropy.png)
 
 These are the committed image artifacts that back the SFT training story in addition to the W&B workspace.
+
+Relevant benchmark and GRPO figures are also committed under [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets).
 
 ## Final Model Choice
 
@@ -146,13 +149,20 @@ Most important change:
 For reviewers who want the training trace directly:
 
 - W&B SFT workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
+- W&B compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
+- W&B DAPO-loss multistage GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
 - committed plot exports: [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots)
+- committed benchmark and GRPO figures: [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets)
 
 Key exported plots:
 
 ![SFT Train Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
 
 ![SFT Eval Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
+
+![Benchmark Task Scores](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
+
+![Focused Multistage GRPO Comparison](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
 
 ## How The System Works
 
