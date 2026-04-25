@@ -108,6 +108,10 @@ def inject_scenario_raw(
         effective_attempts = max(max_attempts, 8)
         if scenario_mode == "benchmark":
             effective_attempts = max(effective_attempts, 48)
+        if int(env.n_line) >= 150:
+            effective_attempts = min(effective_attempts, 12)
+        elif int(env.n_line) >= 80:
+            effective_attempts = min(effective_attempts, 20)
     if task_id == "multi_stage_cascade":
         effective_attempts = max(max_attempts, _available_time_series_count(env))
 
@@ -294,6 +298,27 @@ def _single_fault_benchmark_profile(benchmark_tier: str | None) -> tuple[str, fl
     if benchmark_tier == "single_fault_severe":
         return "benchmark_severe", 0.90, 0.93
     raise ValueError(f"Unsupported single_fault benchmark_tier: {benchmark_tier}")
+
+
+def _single_fault_search_config(env, scenario_mode: ScenarioMode) -> dict[str, Any]:
+    n_line = int(env.n_line)
+    if n_line >= 150:
+        return {
+            "max_warmup": 400 if scenario_mode == "benchmark" else 600,
+            "minimum_acceptable_fallback_rho": 0.72 if scenario_mode == "benchmark" else 0.78,
+            "allow_benchmark_fallback": True,
+        }
+    if n_line >= 80:
+        return {
+            "max_warmup": 800 if scenario_mode == "benchmark" else 1200,
+            "minimum_acceptable_fallback_rho": 0.76 if scenario_mode == "benchmark" else 0.80,
+            "allow_benchmark_fallback": False,
+        }
+    return {
+        "max_warmup": 2000,
+        "minimum_acceptable_fallback_rho": 0.80,
+        "allow_benchmark_fallback": False,
+    }
 
 
 def _adaptive_stress_profile(env) -> dict[str, Any]:
@@ -541,7 +566,8 @@ def _reset_single_fault(
     scenario_mode: ScenarioMode,
     benchmark_tier: str | None,
 ):
-    minimum_acceptable_fallback_rho = 0.80
+    search_config = _single_fault_search_config(env, scenario_mode)
+    minimum_acceptable_fallback_rho = float(search_config["minimum_acceptable_fallback_rho"])
     if scenario_mode == "benchmark":
         stage, min_rho, max_rho_target = _single_fault_benchmark_profile(benchmark_tier)
     else:
@@ -555,7 +581,7 @@ def _reset_single_fault(
         )
     }
     obs = env.reset(seed=seed, options=options)
-    max_warmup = 2000
+    max_warmup = int(search_config["max_warmup"])
     warmup_steps = 0
     best_obs = obs
     best_warmup_steps = 0
@@ -617,7 +643,8 @@ def _reset_single_fault(
         if done:
             break
 
-    if best_stable_obs is not None and best_stable_max_rho >= minimum_acceptable_fallback_rho:
+    allow_fallback = best_stable_obs is not None and best_stable_max_rho >= minimum_acceptable_fallback_rho
+    if allow_fallback and (scenario_mode != "benchmark" or bool(search_config["allow_benchmark_fallback"])):
         logger.warning(
             "Falling back to closest stable single_fault warmup state stage=%s best_warmup_steps=%s best_max_rho=%.4f target=[%.2f, %.2f]",
             stage,
