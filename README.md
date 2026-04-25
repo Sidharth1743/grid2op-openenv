@@ -38,6 +38,8 @@ This repo includes:
 - four benchmark tasks with task-specific rewards and graders
 - a verified-candidate inference pipeline for LLM control
 - a strong supervised fine-tuned submission model
+- a public HF dataset repo for the main training datasets
+- a public HF model repo for the final SFT adapter
 - completed GRPO experiments and cloud training/eval infrastructure
 - benchmark docs, plots, and submission notes
 
@@ -52,7 +54,8 @@ This repo includes:
 - SFT / inference pipeline: [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)
 - Verified-candidate evaluation: [ft_inference.py](/home/sidharth/Desktop/grid2op-openenv/ft_inference.py)
 - GRPO trainer: [train_grpo_verifier.py](/home/sidharth/Desktop/grid2op-openenv/scripts/train_grpo_verifier.py)
-- Saved SFT model artifact: https://huggingface.co/buckets/Sidharth1743/grid2op-finals
+- Public SFT model repo: https://huggingface.co/Sidharth1743/grid2op-qwen3-4b-sft-final
+- Public dataset repo: https://huggingface.co/datasets/Sidharth1743/grid2op-openenv-datasets
 - SFT training workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
 - Completed compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
 - Focused HF GRPO run with DAPO loss: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
@@ -90,7 +93,7 @@ The final submission model is:
 
 - base model: `Qwen/Qwen3-4B-Instruct-2507`
 - adapter: `outputs/models/grid2op-qwen3-4b-sft-3k-v1`
-- saved cloud artifact: https://huggingface.co/buckets/Sidharth1743/grid2op-finals
+- public model artifact: https://huggingface.co/Sidharth1743/grid2op-qwen3-4b-sft-final
 
 Why this is the final model:
 
