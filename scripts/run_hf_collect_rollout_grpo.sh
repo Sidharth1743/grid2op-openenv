@@ -7,16 +7,17 @@ HF_USERNAME="${HF_USERNAME:-Sidharth1743}"
 BRANCH_NAME="${BRANCH_NAME:-hack-submission-clean}"
 HF_JOB_FLAVOR="${HF_JOB_FLAVOR:-l4x1}"
 BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
-ADAPTER_PATH="${ADAPTER_PATH:-/mnt/runs/grid2op-qwen3-4b-grpo-multistage-v1}"
-RUN_LABEL="${RUN_LABEL:-grid2op-qwen3-4b-grpo-multistage-v1}"
+ADAPTER_PATH="${ADAPTER_PATH:-/mnt/models/grid2op-qwen3-4b-sft-3k-v1}"
+OUTPUT_PATH="${OUTPUT_PATH:-/mnt/datasets/grpo_multistage_rollout_h3_v1.jsonl}"
 TASK_IDS="${TASK_IDS:-multi_stage_cascade}"
-EPISODES_PER_TASK="${EPISODES_PER_TASK:-5}"
+EPISODES_PER_TASK="${EPISODES_PER_TASK:-12}"
 SEED_START="${SEED_START:-0}"
+PROMPT_CANDIDATE_COUNT="${PROMPT_CANDIDATE_COUNT:-3}"
+LOOKAHEAD_FIRST_ACTIONS="${LOOKAHEAD_FIRST_ACTIONS:-5}"
+LOOKAHEAD_HORIZON="${LOOKAHEAD_HORIZON:-3}"
+MIN_ADVANTAGE="${MIN_ADVANTAGE:-0.5}"
 PRECISION="${PRECISION:-auto}"
-SUCCESS_THRESHOLD="${SUCCESS_THRESHOLD:-0.1}"
-LOG_DIR="${LOG_DIR:-/mnt/evals}"
-LOG_PATH="${LOG_PATH:-${LOG_DIR}/${RUN_LABEL}_seed${SEED_START}_${EPISODES_PER_TASK}eps.log}"
-SUMMARY_PATH="${SUMMARY_PATH:-${LOG_DIR}/${RUN_LABEL}_seed${SEED_START}_${EPISODES_PER_TASK}eps.summary.json}"
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-96}"
 
 REMOTE_CMD=$(cat <<EOF
 set -euxo pipefail
@@ -27,12 +28,11 @@ export PATH="\$HOME/.local/bin:\$PATH"
 command -v curl
 command -v uv
 git clone --depth 1 --branch ${BRANCH_NAME} https://github.com/Sidharth1743/grid2op-openenv.git /workspace
-mkdir -p ${LOG_DIR}
+mkdir -p "$(dirname "${OUTPUT_PATH}")"
 cd /workspace
 uv sync --frozen --no-dev
 uv pip install torch datasets transformers trl peft accelerate bitsandbytes fastapi uvicorn gradio pandas
-command -v uv
-uv run python -m grid2op_env.server.app --host 127.0.0.1 --port 8018 > /tmp/grid2op_eval_server.log 2>&1 &
+uv run python -m grid2op_env.server.app --host 127.0.0.1 --port 8018 > /tmp/grid2op_collect_server.log 2>&1 &
 SERVER_PID=\$!
 echo "server pid: \$SERVER_PID"
 for i in \$(seq 1 60); do
@@ -43,25 +43,30 @@ for i in \$(seq 1 60); do
 done
 if ! curl -fsS http://127.0.0.1:8018/health >/dev/null; then
   echo '===== server log ====='
-  cat /tmp/grid2op_eval_server.log
+  cat /tmp/grid2op_collect_server.log
   ps -p "\$SERVER_PID" -f || true
   exit 1
 fi
-uv run python ft_inference.py \
+uv run python scripts/collect_rollout_grpo_dataset.py \
   --base-url http://127.0.0.1:8018 \
+  --output-path ${OUTPUT_PATH} \
   --model ${BASE_MODEL} \
   --adapter ${ADAPTER_PATH} \
   --task-id ${TASK_IDS} \
   --episodes-per-task ${EPISODES_PER_TASK} \
   --seed-start ${SEED_START} \
+  --prompt-candidate-count ${PROMPT_CANDIDATE_COUNT} \
+  --lookahead-first-actions ${LOOKAHEAD_FIRST_ACTIONS} \
+  --lookahead-horizon ${LOOKAHEAD_HORIZON} \
+  --min-advantage ${MIN_ADVANTAGE} \
   --precision ${PRECISION} \
-  --success-threshold ${SUCCESS_THRESHOLD} \
-  2>&1 | tee ${LOG_PATH}
-uv run python scripts/check_ft_inference_log.py ${LOG_PATH} | tee ${SUMMARY_PATH}
+  --max-new-tokens ${MAX_NEW_TOKENS}
+uv run python scripts/check_dataset_quality.py ${OUTPUT_PATH}
+wc -l ${OUTPUT_PATH}
 EOF
 )
 
-export HF_USERNAME BRANCH_NAME HF_JOB_FLAVOR BASE_MODEL ADAPTER_PATH RUN_LABEL TASK_IDS EPISODES_PER_TASK SEED_START PRECISION SUCCESS_THRESHOLD LOG_DIR LOG_PATH SUMMARY_PATH REMOTE_CMD
+export HF_USERNAME BRANCH_NAME HF_JOB_FLAVOR BASE_MODEL ADAPTER_PATH OUTPUT_PATH TASK_IDS EPISODES_PER_TASK SEED_START PROMPT_CANDIDATE_COUNT LOOKAHEAD_FIRST_ACTIONS LOOKAHEAD_HORIZON MIN_ADVANTAGE PRECISION MAX_NEW_TOKENS REMOTE_CMD
 
 python - <<'PY'
 import os
@@ -73,7 +78,7 @@ job = run_job(
     env={},
     secrets={"HF_TOKEN": os.environ["HF_TOKEN"]},
     flavor=os.environ["HF_JOB_FLAVOR"],
-    timeout="4h",
+    timeout="6h",
     volumes=[
         Volume(
             type="bucket",
@@ -85,6 +90,5 @@ job = run_job(
 )
 print(f"Job started with ID: {job.id}")
 print(f"View at: {job.url}")
-print(f"Will write log to: {os.environ['LOG_PATH']}")
-print(f"Will write summary to: {os.environ['SUMMARY_PATH']}")
+print(f"Will write dataset to: {os.environ['OUTPUT_PATH']}")
 PY
