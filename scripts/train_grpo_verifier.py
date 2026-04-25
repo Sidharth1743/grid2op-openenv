@@ -722,15 +722,19 @@ class MultiStageEvalCallback(TrainerCallback):
         self.metrics_prefix = metrics_prefix
 
     def _generate_completion(self, model: Any, prompt: list[dict[str, str]]) -> str:
-        input_ids = self.tokenizer.apply_chat_template(
+        encoded = self.tokenizer.apply_chat_template(
             prompt,
             tokenize=True,
             add_generation_prompt=True,
+            return_dict=True,
             return_tensors="pt",
         )
         device = next(model.parameters()).device
-        input_ids = input_ids.to(device)
-        attention_mask = torch.ones_like(input_ids)
+        encoded = {key: value.to(device) for key, value in encoded.items()}
+        input_ids = encoded["input_ids"]
+        attention_mask = encoded.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
         with torch.no_grad():
             output = model.generate(
                 input_ids=input_ids,
