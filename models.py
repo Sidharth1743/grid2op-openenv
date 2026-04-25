@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Literal
 
 from openenv.core.env_server.types import Action, Observation, State
@@ -77,7 +78,11 @@ class EpisodeStepLog(BaseModel):
 class GridState(State):
     """Environment state for the current Grid2Op episode."""
 
-    env_name: str = "l2rpn_case14_sandbox"
+    env_name: str = Field(
+        default_factory=lambda: os.environ.get(
+            "GRID2OP_ENV_NAME", "l2rpn_case14_sandbox"
+        )
+    )
     task_id: TaskId = "single_fault"
     max_steps: int = 0
     n_line: int = 0

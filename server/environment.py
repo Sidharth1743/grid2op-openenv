@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import threading
 from collections import deque
 from collections import defaultdict
@@ -67,12 +68,15 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
     _instances_by_episode_id: dict[str, "GridEnvironment"] = {}
     _instances_lock = threading.RLock()
 
-    def __init__(self, env_name: str = "l2rpn_case14_sandbox"):
+    def __init__(self, env_name: str | None = None):
         import grid2op
 
         super().__init__()
-        self._env_name = env_name
-        self._env = grid2op.make(env_name)
+        resolved_env_name = env_name or os.environ.get(
+            "GRID2OP_ENV_NAME", "l2rpn_case14_sandbox"
+        )
+        self._env_name = resolved_env_name
+        self._env = grid2op.make(resolved_env_name)
         self._last_obs = None
         self._last_raw_obs = None
         self._task_id: TaskId = "single_fault"
@@ -83,7 +87,7 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
         self._instance_lock = threading.RLock()
         self._state = GridState(
             episode_id=str(uuid4()),
-            env_name=env_name,
+            env_name=resolved_env_name,
             task_id=self._task_id,
             max_steps=self._max_steps,
             n_line=int(self._env.n_line),
@@ -529,6 +533,9 @@ class GridEnvironment(Environment[GridAction, GridObservation, GridState]):
             "n1_security_score": float(graph_intelligence.get("n1_security_score", 0.0)),
             "bridge_lines": list(graph_intelligence.get("bridge_lines", [])),
             "bridge_line_count": int(graph_intelligence.get("bridge_line_count", 0)),
+            "faulted_lines": list(
+                self._state.scenario_metadata.get("faulted_lines", [])
+            ),
         }
         if self._task_id == "multi_stage_cascade":
             base_metadata = {

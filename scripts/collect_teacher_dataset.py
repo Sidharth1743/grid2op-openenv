@@ -28,7 +28,11 @@ from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
 
 
 DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_TEACHER_MODEL = "qwen/qwen3-32b"
+DEFAULT_TEACHER_MODEL = os.environ.get("GRID2OP_TEACHER_MODEL", "Qwen/Qwen3.6-27B")
+DEFAULT_TEACHER_API_BASE_URL = os.environ.get(
+    "GRID2OP_TEACHER_API_BASE_URL",
+    os.environ.get("API_BASE_URL", DEFAULT_GROQ_BASE_URL),
+)
 
 
 def _load_env() -> None:
@@ -727,7 +731,7 @@ def collect_teacher_dataset(
 
 def main() -> None:
     _load_env()
-    os.environ.setdefault("API_BASE_URL", DEFAULT_GROQ_BASE_URL)
+    os.environ.setdefault("API_BASE_URL", DEFAULT_TEACHER_API_BASE_URL)
     os.environ.setdefault("MODEL_NAME", DEFAULT_TEACHER_MODEL)
     if not os.environ.get("API_KEY") and os.environ.get("GROQ_API_KEY"):
         os.environ.setdefault("API_KEY", os.environ["GROQ_API_KEY"])
@@ -738,6 +742,11 @@ def main() -> None:
     parser.add_argument(
         "--base-url",
         default=os.environ.get("GRID2OP_BASE_URL", "http://127.0.0.1:8000"),
+    )
+    parser.add_argument(
+        "--teacher-api-base-url",
+        default=os.environ.get("API_BASE_URL", DEFAULT_TEACHER_API_BASE_URL),
+        help="OpenAI-compatible API endpoint for the teacher model.",
     )
     parser.add_argument(
         "--output",
@@ -759,12 +768,19 @@ def main() -> None:
         choices=["benchmark", "curriculum"],
         default=os.environ.get("GRID2OP_SCENARIO_MODE", "benchmark"),
     )
-    parser.add_argument("--model", default=_default_model_name())
+    parser.add_argument(
+        "--model",
+        default=_default_model_name(),
+        help="Teacher model served from the configured OpenAI-compatible API.",
+    )
     parser.add_argument("--max-tokens", type=int, default=int(os.environ.get("MAX_TOKENS", "300")))
     parser.add_argument(
         "--temperature", type=float, default=float(os.environ.get("TEMPERATURE", "0.2"))
     )
     args = parser.parse_args()
+
+    os.environ["API_BASE_URL"] = args.teacher_api_base_url
+    os.environ["MODEL_NAME"] = args.model
 
     stats = collect_teacher_dataset(
         base_url=args.base_url,

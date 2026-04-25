@@ -797,6 +797,9 @@ def build_proposal_prompt(
     ]
     generator_summary = summarize_generators(observation.gen_p, limit=6)
     cooldown_info = observation.metadata.get("time_before_cooldown_line", [])
+    faulted_lines = [
+        int(line_id) for line_id in observation.metadata.get("faulted_lines", [])
+    ]
     stage_index = int(observation.metadata.get("stage_index", 1))
     steps_to_stage_boundary = int(
         observation.metadata.get("steps_to_stage_boundary", 0)
@@ -885,7 +888,10 @@ def build_proposal_prompt(
         )
         lines.insert(
             7,
-            f"FAULTED_LINE=0; disconnected_now={json.dumps([entry['line_id'] for entry in disconnected], separators=(',', ':'))}",
+            "FAULTED_LINES="
+            + json.dumps(faulted_lines, separators=(",", ":"))
+            + "; disconnected_now="
+            + json.dumps([entry["line_id"] for entry in disconnected], separators=(",", ":")),
         )
         lines.insert(
             8,
@@ -901,7 +907,7 @@ def build_proposal_prompt(
         )
         lines.insert(
             11,
-            "RECONNECTION OBJECTIVE: When line 0 cooldown reaches 0, include a reconnect_line candidate for line 0 unless graph intelligence or current overloads strongly suggest it is unsafe.",
+            "RECONNECTION OBJECTIVE: When any faulted line cooldown reaches 0, include reconnect_line candidates for those lines unless graph intelligence or current overloads strongly suggest they are unsafe.",
         )
         lines.insert(
             12,
@@ -1060,7 +1066,7 @@ def build_final_selection_prompt(
         )
         lines.insert(
             8,
-            "RULE: When a safe reconnect_line action for line 0 is available after cooldown, strongly prefer it if it improves or preserves security.",
+            "RULE: When a safe reconnect_line action for a faulted line is available after cooldown, strongly prefer it if it improves or preserves security.",
         )
         lines.insert(
             9,

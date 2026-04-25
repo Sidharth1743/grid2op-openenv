@@ -354,9 +354,9 @@ def build_grid2op_gradio_app(
 
                     Use the same schema as the API:
                     - `do_nothing: true`
-                    - `line_set: {"0": 1}` to reconnect line 0
-                    - `line_set: {"4": -1}` to disconnect line 4
-                    - `redispatch: {"5": -15.0}` for MW adjustments
+                    - `line_set: {"12": 1}` to reconnect a line
+                    - `line_set: {"37": -1}` to disconnect a line
+                    - `redispatch: {"5": -15.0}` for generator MW adjustments
                     """
                 )
                 step_btn = gr.Button("Apply Action", variant="primary")

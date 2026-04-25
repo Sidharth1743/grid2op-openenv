@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+import networkx as nx
+
 from grid2op.Exceptions import Grid2OpException
 
 try:
@@ -61,17 +63,6 @@ TASKS: Dict[TaskId, TaskSpec] = {
         max_steps=30,
     ),
 }
-
-CASCADE_LINE_PAIRS: List[tuple[int, int]] = [
-    (0, 8),
-    (0, 7),
-    (0, 3),
-]
-MULTI_STAGE_LINE_TRIPLETS: List[tuple[int, int, int]] = [
-    (2, 4, 14),
-    (2, 4, 15),
-    (4, 14, 16),
-]
 
 BENCHMARK_TIERS: Dict[TaskId, List[str]] = {
     "single_fault": ["single_fault_easy", "single_fault_moderate", "single_fault_severe"],
@@ -305,37 +296,222 @@ def _single_fault_benchmark_profile(benchmark_tier: str | None) -> tuple[str, fl
     raise ValueError(f"Unsupported single_fault benchmark_tier: {benchmark_tier}")
 
 
-def _cascade_profile(difficulty_level: int | None, seed: int | None) -> tuple[str, list[int], float]:
+def _adaptive_stress_profile(env) -> dict[str, Any]:
+    n_line = int(env.n_line)
+    if n_line >= 150:
+        return {
+            "cascade_curriculum": [
+                ("one_line_2pct", 1, 1.02),
+                ("one_line_4pct", 1, 1.04),
+                ("one_line_6pct", 1, 1.06),
+                ("two_lines_5pct", 2, 1.05),
+                ("two_lines_7pct", 2, 1.07),
+                ("two_lines_9pct", 2, 1.09),
+            ],
+            "cascade_benchmark": {
+                "cascade_prevent_easy": ("benchmark_easy", 1, 1.03),
+                "cascade_prevent_medium": ("benchmark_medium", 1, 1.05),
+                "cascade_prevent_hard": ("benchmark_hard", 2, 1.07),
+                "cascade_prevent_extreme": ("benchmark_extreme", 2, 1.09),
+            },
+            "multi_stage": {
+                "stage": "adaptive_two_stage",
+                "fault_count": 2,
+                "load_scale": 1.05,
+                "stage_count": 2,
+                "stage_length": 10,
+                "overflow_window": 3,
+                "probe_steps": 3,
+            },
+        }
+    if n_line >= 80:
+        return {
+            "cascade_curriculum": [
+                ("one_line_3pct", 1, 1.03),
+                ("one_line_5pct", 1, 1.05),
+                ("two_lines_5pct", 2, 1.05),
+                ("two_lines_8pct", 2, 1.08),
+                ("two_lines_10pct", 2, 1.10),
+                ("two_lines_12pct", 2, 1.12),
+            ],
+            "cascade_benchmark": {
+                "cascade_prevent_easy": ("benchmark_easy", 1, 1.04),
+                "cascade_prevent_medium": ("benchmark_medium", 1, 1.07),
+                "cascade_prevent_hard": ("benchmark_hard", 2, 1.09),
+                "cascade_prevent_extreme": ("benchmark_extreme", 2, 1.11),
+            },
+            "multi_stage": {
+                "stage": "adaptive_three_stage",
+                "fault_count": 2,
+                "load_scale": 1.08,
+                "stage_count": 3,
+                "stage_length": 10,
+                "overflow_window": 3,
+                "probe_steps": 4,
+            },
+        }
+    return {
+        "cascade_curriculum": [
+            ("one_line_5pct", 1, 1.05),
+            ("one_line_10pct", 1, 1.10),
+            ("two_lines_10pct", 2, 1.10),
+            ("two_lines_15pct", 2, 1.15),
+        ],
+        "cascade_benchmark": {
+            "cascade_prevent_easy": ("benchmark_easy", 1, 1.05),
+            "cascade_prevent_medium": ("benchmark_medium", 1, 1.10),
+            "cascade_prevent_hard": ("benchmark_hard", 2, 1.10),
+            "cascade_prevent_extreme": ("benchmark_extreme", 2, 1.15),
+        },
+        "multi_stage": {
+            "stage": "expert_three_stage",
+            "fault_count": 3,
+            "load_scale": 1.20,
+            "stage_count": 3,
+            "stage_length": 10,
+            "overflow_window": 2,
+            "probe_steps": 5,
+        },
+    }
+
+
+def _cascade_profile(env, difficulty_level: int | None, seed: int | None) -> tuple[str, list[int], float]:
     episode = _curriculum_episode(difficulty_level)
-    pair_index = ((episode - 1) + (0 if seed is None else int(seed))) % len(CASCADE_LINE_PAIRS)
-    selected_pair = list(CASCADE_LINE_PAIRS[pair_index])
-    if episode <= 3:
-        return "one_line_5pct", [selected_pair[0]], 1.05
-    if episode <= 6:
-        return "one_line_10pct", [selected_pair[0]], 1.10
-    if episode <= 9:
-        return "two_lines_10pct", selected_pair, 1.10
-    return "two_lines_15pct", selected_pair, 1.15
+    curriculum = _adaptive_stress_profile(env)["cascade_curriculum"]
+    stage, fault_count, load_scale = curriculum[min(episode - 1, len(curriculum) - 1)]
+    selected_lines = _select_faulted_lines(
+        env=env,
+        count=int(fault_count),
+        seed=(episode - 1) + (0 if seed is None else int(seed)),
+    )
+    return stage, selected_lines, float(load_scale)
 
 
-def _cascade_benchmark_profile(benchmark_tier: str | None, seed: int | None) -> tuple[str, list[int], float]:
-    pair_index = 0 if seed is None else int(seed) % len(CASCADE_LINE_PAIRS)
-    selected_pair = list(CASCADE_LINE_PAIRS[pair_index])
-    if benchmark_tier == "cascade_prevent_easy":
-        return "benchmark_easy", [selected_pair[0]], 1.05
-    if benchmark_tier == "cascade_prevent_medium":
-        return "benchmark_medium", [selected_pair[0]], 1.10
-    if benchmark_tier == "cascade_prevent_hard":
-        return "benchmark_hard", selected_pair, 1.10
-    if benchmark_tier == "cascade_prevent_extreme":
-        return "benchmark_extreme", selected_pair, 1.15
+def _cascade_benchmark_profile(env, benchmark_tier: str | None, seed: int | None) -> tuple[str, list[int], float]:
+    benchmark_profiles = _adaptive_stress_profile(env)["cascade_benchmark"]
+    if benchmark_tier in benchmark_profiles:
+        stage, fault_count, load_scale = benchmark_profiles[benchmark_tier]
+        selected_lines = _select_faulted_lines(
+            env=env,
+            count=int(fault_count),
+            seed=0 if seed is None else int(seed),
+        )
+        return stage, selected_lines, float(load_scale)
     raise ValueError(f"Unsupported cascade_prevent benchmark_tier: {benchmark_tier}")
 
 
-def _multi_stage_profile(seed: int | None) -> tuple[str, list[int], float]:
-    triplet_index = 0 if seed is None else int(seed) % len(MULTI_STAGE_LINE_TRIPLETS)
-    selected_triplet = list(MULTI_STAGE_LINE_TRIPLETS[triplet_index])
-    return "expert_three_stage", selected_triplet, 1.20
+def _multi_stage_profile(env, seed: int | None) -> tuple[str, list[int], float, int, int, int]:
+    profile = _adaptive_stress_profile(env)["multi_stage"]
+    selected_lines = _select_faulted_lines(
+        env=env,
+        count=int(profile["fault_count"]),
+        seed=0 if seed is None else int(seed),
+    )
+    return (
+        str(profile["stage"]),
+        selected_lines,
+        float(profile["load_scale"]),
+        int(profile["stage_count"]),
+        int(profile["stage_length"]),
+        int(profile["overflow_window"]),
+    )
+
+
+def _line_graph(env) -> tuple[nx.Graph, dict[tuple[int, int], list[int]]]:
+    graph = nx.Graph()
+    pair_to_lines: dict[tuple[int, int], list[int]] = {}
+    for line_id in range(int(env.n_line)):
+        u = int(env.line_or_to_subid[line_id])
+        v = int(env.line_ex_to_subid[line_id])
+        key = tuple(sorted((u, v)))
+        pair_to_lines.setdefault(key, []).append(int(line_id))
+        if graph.has_edge(*key):
+            continue
+        graph.add_edge(*key)
+    return graph, pair_to_lines
+
+
+def _rank_fault_lines(env) -> list[int]:
+    graph, pair_to_lines = _line_graph(env)
+    if graph.number_of_edges() == 0:
+        return list(range(int(env.n_line)))
+
+    bridges = {tuple(sorted(edge)) for edge in nx.bridges(graph)}
+    edge_betweenness = nx.edge_betweenness_centrality(graph)
+    degrees = dict(graph.degree())
+
+    ranked = sorted(
+        range(int(env.n_line)),
+        key=lambda line_id: _fault_line_rank_key(
+            env=env,
+            line_id=int(line_id),
+            bridges=bridges,
+            edge_betweenness=edge_betweenness,
+            degrees=degrees,
+            pair_to_lines=pair_to_lines,
+        ),
+    )
+    return ranked
+
+
+def _fault_line_rank_key(
+    env,
+    line_id: int,
+    bridges: set[tuple[int, int]],
+    edge_betweenness: dict[tuple[int, int], float],
+    degrees: dict[int, int],
+    pair_to_lines: dict[tuple[int, int], list[int]],
+) -> tuple[float, float, float, int]:
+    u = int(env.line_or_to_subid[line_id])
+    v = int(env.line_ex_to_subid[line_id])
+    key = tuple(sorted((u, v)))
+    pair_size = len(pair_to_lines.get(key, []))
+    is_bridge = 1.0 if key in bridges and pair_size == 1 else 0.0
+    centrality = float(edge_betweenness.get(key, 0.0))
+    endpoint_degree = float(degrees.get(u, 0) + degrees.get(v, 0))
+    return (
+        is_bridge,
+        -centrality,
+        -endpoint_degree,
+        int(line_id),
+    )
+
+
+def _select_faulted_lines(
+    env,
+    count: int,
+    seed: int,
+) -> list[int]:
+    if env is None:
+        raise ValueError("Environment instance is required for dynamic fault selection")
+
+    ranked = _rank_fault_lines(env)
+    if not ranked:
+        return list(range(min(int(count), int(env.n_line))))
+
+    offset = int(seed) % len(ranked) if ranked else 0
+    rotated = ranked[offset:] + ranked[:offset]
+    selected: list[int] = []
+    used_substations: set[int] = set()
+
+    for line_id in rotated:
+        u = int(env.line_or_to_subid[line_id])
+        v = int(env.line_ex_to_subid[line_id])
+        if u in used_substations or v in used_substations:
+            continue
+        selected.append(int(line_id))
+        used_substations.update({u, v})
+        if len(selected) >= count:
+            return selected
+
+    for line_id in rotated:
+        if int(line_id) in selected:
+            continue
+        selected.append(int(line_id))
+        if len(selected) >= count:
+            return selected
+
+    return selected
 
 
 def benchmark_tiers_for_task(task_id: TaskId) -> list[str]:
@@ -494,16 +670,22 @@ def _reset_n_minus_1(
     scenario_mode: ScenarioMode,
     benchmark_tier: str | None,
 ):
+    faulted_lines = _select_faulted_lines(
+        env=env,
+        count=1,
+        seed=0 if seed is None else int(seed),
+    )
     obs = env.reset(
         seed=seed,
-        options={"init state": {"set_line_status": [(0, -1)]}},
+        options={"init state": {"set_line_status": [(faulted_lines[0], -1)]}},
     )
     logger.info(
-        "Initialized n_minus_1 with faulted_lines=[0] curriculum_episode=%s",
+        "Initialized n_minus_1 with faulted_lines=%s curriculum_episode=%s",
+        faulted_lines,
         _curriculum_episode(difficulty_level),
     )
     return obs, {
-        "faulted_lines": [0],
+        "faulted_lines": faulted_lines,
         "curriculum_episode": _curriculum_episode(difficulty_level),
         "curriculum_stage": "fixed_n_minus_1",
         "scenario_mode": scenario_mode,
@@ -523,9 +705,9 @@ def _reset_cascade_prevent(
     base_obs = env.reset(seed=seed)
     del attempt
     if scenario_mode == "benchmark":
-        stage, faulted_lines, load_scale = _cascade_benchmark_profile(benchmark_tier, seed)
+        stage, faulted_lines, load_scale = _cascade_benchmark_profile(env, benchmark_tier, seed)
     else:
-        stage, faulted_lines, load_scale = _cascade_profile(difficulty_level, seed)
+        stage, faulted_lines, load_scale = _cascade_profile(env, difficulty_level, seed)
     load_p = [float(v) for v in (base_obs.load_p * load_scale).astype(float).tolist()]
     obs = env.reset(
         seed=seed,
@@ -572,8 +754,15 @@ def _reset_multi_stage_cascade(
     benchmark_tier: str | None,
 ):
     del difficulty_level
-    stage, faulted_lines, load_scale = _multi_stage_profile(seed)
-    _set_overflow_window(env, allowed_steps=2)
+    (
+        stage,
+        faulted_lines,
+        load_scale,
+        stage_count,
+        stage_length,
+        overflow_window,
+    ) = _multi_stage_profile(env, seed)
+    _set_overflow_window(env, allowed_steps=overflow_window)
     total = _available_time_series_count(env)
     for offset in range(total):
         time_series_id = int(((0 if seed is None else int(seed) * 131) + attempt + offset) % total)
@@ -588,7 +777,7 @@ def _reset_multi_stage_cascade(
             },
         }
         obs = env.reset(seed=seed, options=scenario_options)
-        if _multi_stage_survives_probe(env, min_steps=5):
+        if _multi_stage_survives_probe(env, min_steps=max(2, stage_count + 1)):
             replayed = env.reset(seed=seed, options=scenario_options)
             logger.info(
                 "Initialized multi_stage_cascade with stage=%s faulted_lines=%s load_scale=%.2f time_series_id=%s max_rho=%.4f overloaded=%s",
@@ -608,15 +797,15 @@ def _reset_multi_stage_cascade(
                 "scenario_mode": scenario_mode,
                 "benchmark_tier": benchmark_tier or "multi_stage_cascade_expert",
                 "benchmark_valid": True,
-                "stage_count": 3,
-                "stage_length": 10,
+                "stage_count": stage_count,
+                "stage_length": stage_length,
                 "initial_total_load_mw": round(float(sum(load_p)), 6),
-                "overflow_window": 2,
-                "do_nothing_probe_steps": 5,
+                "overflow_window": overflow_window,
+                "do_nothing_probe_steps": max(2, stage_count + 1),
             }
 
     raise Grid2OpException(
-        "Could not find a viable multi_stage_cascade chronic where do_nothing survives 5 steps under the calibrated 3-line +15% load scenario"
+        "Could not find a viable multi_stage_cascade chronic under the calibrated adaptive fault-and-load profile"
     )
 
 
