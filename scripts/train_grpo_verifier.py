@@ -811,7 +811,7 @@ class MultiStageEvalCallback(TrainerCallback):
         was_training = model.training
         model.eval()
         metrics = self._compute_metrics(model)
-        wandb.log(metrics, step=state.global_step)
+        wandb.log(metrics)
         if was_training:
             model.train()
         return control
