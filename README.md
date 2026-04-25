@@ -9,34 +9,176 @@ pinned: false
 ---
 # Grid2Op OpenEnv Environment
 
-> **Power grid topology control for reinforcement learning — four tasks, from overload relief to multi-stage cascade damage control.**
+> An OpenEnv-compatible power-grid control environment built on Grid2Op, with four benchmark tasks, a verified-action inference pipeline, and a strong SFT submission model.
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
 [![Grid2Op](https://img.shields.io/badge/Grid2Op-l2rpn__case14__sandbox-green)](https://grid2op.readthedocs.io)
-[![HF Spaces](https://img.shields.io/badge/HuggingFace-Spaces-yellow)](https://huggingface.co/spaces/Sidharth1743/grid2op-openenv)
+[![HF Space](https://img.shields.io/badge/HuggingFace-Space-yellow)](https://huggingface.co/spaces/Sidharth1743/grid2op-openenv)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
----
+## Problem
 
-## What This Is
+Modern power grids must keep electricity flowing even when lines overload, contingencies occur, or cascades begin. In practice, that means an operator must repeatedly answer a hard question:
 
-This environment wraps the **IEEE 14-bus power grid** (`l2rpn_case14_sandbox`) as a fully compliant [OpenEnv](https://github.com/meta-pytorch/OpenEnv) environment. It exposes four tasks of increasing difficulty, each grounded in real power systems research, with deterministic graders and a physics-backed simulation endpoint.
+> given the current grid state, what control action is both safe and operationally useful right now?
 
-The design principle is simple: **the server owns the simulation state**. Planning uses `obs.simulate()` on the live session rather than a local mirror, so simulation results are always exact.
+This repository turns that problem into an OpenEnv environment built on **Grid2Op**. The environment exposes four progressively harder control tasks on the IEEE 14-bus sandbox grid, ranging from simple overload relief to multi-stage cascade management.
 
-The included baseline agent uses a **Think → Simulate → Act** loop: the LLM proposes candidate actions, the server validates each one via physics simulation, and the LLM selects the safest option. This is a physics-grounded LLM planner, not a zero-shot guesser.
+The central design choice is simple:
 
----
+- the simulator stays authoritative
+- actions are checked against physics
+- the model is evaluated on safe, verified grid control rather than free-form guessing
+
+## What This Repository Contains
+
+This repo includes:
+
+- an OpenEnv-compatible server around `l2rpn_case14_sandbox`
+- four benchmark tasks with task-specific rewards and graders
+- a verified-candidate inference pipeline for LLM control
+- a strong supervised fine-tuned submission model
+- completed GRPO experiments and cloud training/eval infrastructure
+- benchmark docs, plots, and submission notes
+
+## Deliverables
+
+### Public Hugging Face Space
+
+- Space: https://huggingface.co/spaces/Sidharth1743/grid2op-openenv
+
+### Training Code
+
+- SFT / inference pipeline: [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)
+- Verified-candidate evaluation: [ft_inference.py](/home/sidharth/Desktop/grid2op-openenv/ft_inference.py)
+- GRPO trainer: [train_grpo_verifier.py](/home/sidharth/Desktop/grid2op-openenv/scripts/train_grpo_verifier.py)
+- Dataset and experiment notes:
+  - [evaluation.md](/home/sidharth/Desktop/grid2op-openenv/hack/evaluation.md)
+  - [grpo_exp.md](/home/sidharth/Desktop/grid2op-openenv/hack/grpo_exp.md)
+  - [benchmark.md](/home/sidharth/Desktop/grid2op-openenv/hack/benchmark.md)
+  - [reward_hack.md](/home/sidharth/Desktop/grid2op-openenv/hack/reward_hack.md)
+
+### Key Plots
+
+- Main benchmark comparison: [benchmark_task_scores.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
+- Seen vs unseen seeds: [generalization_seen_vs_unseen.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/generalization_seen_vs_unseen.png)
+- Safety / failures: [safety_failures.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/safety_failures.png)
+- Focused multistage GRPO plot: [multistage_dapo_focus.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
+- Project-level tradeoff view: [performance_vs_effort.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/performance_vs_effort.png)
+- Plot notes: [plots.md](/home/sidharth/Desktop/grid2op-openenv/hack/plots.md)
+
+## Final Model Choice
+
+The final submission model is:
+
+- base model: `Qwen/Qwen3-4B-Instruct-2507`
+- adapter: `outputs/models/grid2op-qwen3-4b-sft-3k-v1`
+
+Why this is the final model:
+
+- it clearly improves over the base model on the hard tasks
+- it is safe on both the main seed block and unseen seeds
+- completed GRPO runs were technically successful, but they did not beat the SFT model
+
+## Results
+
+### Final SFT Benchmark Scores
+
+Seed block `0..4`, `5` episodes per task:
+
+| Task | Score |
+|---|---:|
+| `single_fault` | `0.856` |
+| `n_minus_1` | `0.990` |
+| `cascade_prevent` | `0.990` |
+| `multi_stage_cascade` | `0.9156444` |
+
+Safety:
+
+- failures: `0`
+- safety pass: `true`
+
+Unseen seed block `100..102`, `3` episodes per task:
+
+| Task | Score |
+|---|---:|
+| `single_fault` | `0.830` |
+| `n_minus_1` | `0.9222223` |
+| `cascade_prevent` | `0.990` |
+| `multi_stage_cascade` | `0.9069863` |
+
+Safety:
+
+- failures: `0`
+- safety pass: `true`
+
+### Base Vs SFT
+
+Main seed block `0..4`:
+
+| Task | Base | SFT |
+|---|---:|---:|
+| `single_fault` | `0.856` | `0.856` |
+| `n_minus_1` | `0.952` | `0.990` |
+| `cascade_prevent` | `0.000` | `0.990` |
+| `multi_stage_cascade` | `0.000` | `0.9156444` |
+
+Most important change:
+
+- the base model often failed on the hard tasks because it produced invalid or unverified actions
+- the SFT model learned the environment-specific action protocol and completed the evaluated episodes safely
+
+## How The System Works
+
+The environment uses a **verified-candidate control loop**:
+
+1. reset the task
+2. enumerate legal grid actions
+3. simulate those actions with Grid2Op
+4. prompt the model with verified candidate outcomes
+5. require the model to output a valid `GridAction`
+6. require the selected action to match one verified candidate exactly
+7. execute and grade
+
+This is important because the model is not rewarded for inventing arbitrary actions. It must operate inside a simulator-checked action set.
+
+## Benchmark Tasks
+
+All tasks run on the IEEE 14-bus sandbox grid:
+
+| Task | Horizon | Core Objective |
+|---|---:|---|
+| `single_fault` | `10` | relieve overload through redispatch |
+| `n_minus_1` | `20` | operate safely after a contingency and reconnect well |
+| `cascade_prevent` | `30` | stop automatic trips from propagating |
+| `multi_stage_cascade` | `30` | preserve load across staged degradation |
+
+Task-specific notes:
+
+- [task_1.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_1.md)
+- [task_2.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_2.md)
+- [task_3.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_3.md)
+- [task_4.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_4.md)
+
+## Why The Environment Is Strong
+
+The benchmark is strong for three reasons:
+
+1. every model uses the same verified-candidate evaluation path
+2. each task has its own grader, aligned to its real objective
+3. the project evaluates on both seen and unseen seed blocks
+
+That makes the comparison between Base, SFT, and GRPO much more meaningful than a single reward number or a single cherry-picked trajectory.
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.10–3.12
-- `uv` (recommended) or `pip`
-- Docker (for containerised deployment)
+- `uv`
+- Docker for containerized deployment
 
-### 1. Install
+### Install
 
 ```bash
 uv venv
@@ -44,15 +186,17 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-### 2. Run the server
+### Run the server
 
 ```bash
-uv run server --port 8000
+env UV_CACHE_DIR=/tmp/uv-cache uv run --no-dev server --port 8000
 ```
 
-The server listens at `http://127.0.0.1:8000`.
+Server URL:
 
-### 3. Smoke test
+- `http://127.0.0.1:8000`
+
+### Smoke test
 
 ```bash
 curl -X POST http://127.0.0.1:8000/reset \
@@ -62,16 +206,9 @@ curl -X POST http://127.0.0.1:8000/reset \
 curl http://127.0.0.1:8000/tasks
 ```
 
-An empty `POST /reset {}` now defaults to:
-- `task_id=single_fault`
-- `scenario_mode=benchmark`
-- the first backend benchmark tier for that task (`single_fault_easy`)
+### Run the baseline agent
 
-This default keeps public resets fast and matches the benchmark-oriented submission flow.
-
-### 4. Run the baseline agent
-
-Create a `.env` file:
+Create `.env`:
 
 ```env
 GRID2OP_BASE_URL=http://127.0.0.1:8000
@@ -80,7 +217,7 @@ HF_TOKEN=hf_your_token
 MODEL_NAME=openai/gpt-oss-20b:groq
 ```
 
-Then run against any task:
+Then run:
 
 ```bash
 python inference.py --task-id single_fault
@@ -89,354 +226,77 @@ python inference.py --task-id cascade_prevent
 python inference.py --task-id multi_stage_cascade
 ```
 
-### 5. Run tests
+### Run tests
 
 ```bash
-uv run --extra dev pytest tests/test_grid2op_env.py -q
+env UV_CACHE_DIR=/tmp/uv-cache uv run --extra dev pytest tests/test_grid2op_env.py -q
 ```
 
----
+## API
 
-## Docker
+Important endpoints:
 
-```bash
-docker build -t grid2op-env:local .
-docker run --rm -p 8000:8000 grid2op-env:local
-```
-
-The image pre-downloads `l2rpn_case14_sandbox` at build time so runtime startup is instant.
-
----
-
-## Grid
-
-All four tasks use the same underlying grid:
-
-| Property | Value |
-|---|---|
-| Environment | `l2rpn_case14_sandbox` (IEEE 14-bus) |
-| Substations | 14 |
-| Transmission lines | 20 |
-| Generators | 6 |
-| Loads | 11 |
-| Power flow backend | `lightsim2grid` (AC) |
-| Time resolution | 5 minutes per step |
-| Scenario data | Pre-recorded chronics (load + generation time series) |
-
----
-
-## The Scenario Dataset
-
-Our companion repository, **[grid2op-data](https://github.com/Jayashree1743/grid2op-data)**, provides comprehensive data intelligence for all `1,014` scenarios.
-
-### Data Files per Scenario
-
-Each scenario folder contains:
-
-| File | Description | Example Values |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| `load_p.csv` | Active power demand (MW) | 11 columns, 8,065 rows |
-| `load_q.csv` | Reactive power demand (MVAr) | ~70% of active power |
-| `prod_p.csv` | Generator output (MW) | 6 generators tracked |
-| `prod_v.csv` | Voltage setpoints (p.u.) | Typically 0.95–1.05 |
-| `*_forecasted.csv` | 5-minute-ahead forecasts | Used by RL agents |
+| `/reset` | POST | reset a task episode |
+| `/step` | POST | apply a `GridAction` |
+| `/state` | GET | inspect current state |
+| `/simulate` | POST | test candidate actions without advancing state |
+| `/planning_context` | GET | graph and topology intelligence |
+| `/grader` | POST | deterministic task scoring |
+| `/tasks` | GET | task list and descriptions |
+| `/ws` | WebSocket | OpenEnv-compatible persistent session |
 
-### Key Dataset Statistics
+## Graph And Topology Intelligence
+
+The environment exposes structural guidance computed from the live grid state, including:
+
+- `bridge_lines`
+- `safe_to_disconnect`
+- `n_minus_1_critical_lines`
+- high-centrality buses
+- congestion corridors
+- islanded clusters
+
+This helps the planner reason about grid structure, not just line overload numbers.
+
+Main implementation:
+
+- [graph_analysis.py](/home/sidharth/Desktop/grid2op-openenv/graph_analysis.py)
+- [environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py)
+
+## Project Structure
 
 ```text
-Total scenarios analyzed:    1,014
-Timesteps per scenario:      8,065 (~4.7 weeks each)
-Total data points:           ~8.2 million
-Average system load:         ~257 MW
-Peak load observed:          ~321 MW (scenario 0001)
-Minimum load observed:       ~190 MW
-Average peak hour:           19:24 (7:24 PM)
-Reactive power burden:       0.70 (load_q / load_p)
-Average ramp rate:           1.72 MW per 5-min step
-Supply-demand imbalance:     4.92 MW (mean)
-```
-
----
-
-## Action Space
-
-Agents submit a `GridAction` with any combination of:
-
-| Field | Type | Description |
-|---|---|---|
-| `line_set` | `dict[int, int]` | Map of `line_id → status` where `1` = connect, `-1` = disconnect |
-| `redispatch` | `dict[int, float]` | Map of `gen_id → delta_mw` (subject to ramp limits) |
-| `do_nothing` | `bool` | Explicit no-op |
-
-```json
-{
-  "line_set": {"4": -1},
-  "redispatch": {"2": 15.0},
-  "do_nothing": false
-}
-```
-
-All actions are validated server-side. Invalid indices are silently stripped. Ramp limits are enforced. Bridge lines that would island the network are rejected before reaching the physics solver.
-
----
-
-## Observation Space
-
-Each step returns a `GridObservation`:
-
-| Field | Shape | Description |
-|---|---|---|
-| `rho` | `[20]` | Line loading ratio — `1.0` = thermal limit |
-| `gen_p` | `[6]` | Generator active power output (MW) |
-| `load_p` | `[11]` | Load active power demand (MW) |
-| `line_status` | `[20]` | `true` = connected, `false` = disconnected |
-| `timestep_overflow` | `[20]` | Consecutive steps each line has been overloaded |
-| `reward` | `float` | Shaped reward for this step |
-| `done` | `bool` | Whether the episode has ended |
-| `metadata` | `dict` | Task-specific fields (stage index, available load ratio, etc.) |
-
-
-## 🕸️ Graph Intelligence
-
-One of the most important capabilities of this environment is the **graph intelligence layer** exposed through:
-
-```text
-POST /planning_context
-````
-
-This intelligence is computed from the **live server observation** inside `server/environment.py`, which internally calls `graph_analysis.py`.
-
-Instead of relying only on raw `rho` values, the planner also receives **structural grid insights**. This allows the agent to:
-
-* avoid unsafe topology edits
-* detect critical transmission corridors
-* reason about cascading risks
-* make topology-safe switching decisions
-
----
-
-## 🔍 What Graph Intelligence Includes
-
-The graph analysis currently provides:
-
-* **`bridge_lines`** → connected lines whose removal would split the active grid graph
-* **`safe_to_disconnect`** → connected lines that can be disconnected without fragmenting the grid
-* **`n_minus_1_critical_lines`** → structurally critical lines important for N-1 contingency reasoning
-* **`high_centrality_buses`** → buses with high betweenness centrality in the active network
-* **`islanded_clusters`** → bus clusters already separated from the main connected component
-* **`congestion_corridor`** → short summary of exporter buses, importer buses, and stressed lines
-* **`flow_clusters`** → exporter/importer bus rankings derived from `flow_bus_matrix`
-* **`stressed_lines`** → highest-`rho` connected lines with endpoint and overflow context
-* **`parallel_groups`** → transmission lines sharing the same terminal substations
----
-
-This makes the planner **topology-aware, contingency-aware, and cascade-aware**, rather than purely overload-reactive.
-
-## Tasks
-
-### Task 1 — `single_fault` · Easy · 10 steps
-
-**Scenario**: The grid is intact but one or more lines are running hot (90–98% loading). No lines have tripped yet, but the chronic is trending toward overload.
-
-**Objective**: Bring all lines below the safe threshold within 10 steps.
-
-**What makes it easy**: Single problem region, full topology intact, multiple redundant paths available.
-
-**Reward**:
-- success bonus when all lines fall below the task threshold
-- `+0.05 × max(0, 1 - max_rho)` to reward lower peak loading
-- `−0.2 × overloaded_line_count` to penalise unresolved overloads
-- redispatch penalty proportional to total redispatch magnitude
-- `−5.0` terminal penalty if the episode reaches the time limit without clearing the target
-
-**Grader**: Score based on whether all lines reached below threshold and how many steps it took. Faster resolution = higher score.
-
-**Research basis**: Physics reward formulation from Dwivedi et al. (2024) [arXiv:2411.18050]. Switching cost design from the same paper's `µ_line × c_line × W_ℓ[n]` formulation.
-
----
-
-### Task 2 — `n_minus_1` · Medium · 20 steps
-
-**Scenario**: Line 0 is disconnected at reset (N-1 contingency). The remaining 19 lines absorb the rerouted flow. Several lines are immediately pushed to 70–90% loading.
-
-**Objective**: Clear the emergency, maintain N-1 secure operation for 20 steps, and reconnect the faulted line when its cooldown expires.
-
-**What makes it medium**: The agent must manage sustained stress across multiple lines over a longer horizon, and must understand that the cooldown on line 0 creates a reconnection opportunity that should not be missed.
-
-**Reward**: Three-component RL2Grid structure:
-
-```
-R = 0.3 × R_survive + 0.6 × R_overload + 0.1 × R_cost
-```
-
-- `R_survive`: constant +1.0 per step alive
-- `R_overload`: clipped thermal margin `mean(clip(1 - ρ, -1, 1))`
-- `R_cost`: economic penalty for redispatch proportional to `|delta_mw| / max_ramp`
-- Reconnection bonus: +2.0 when a faulted line is successfully reconnected without worsening loading
-
-**Grader**:
-- 30% emergency response quality — did all lines reach below `ρ_danger = 0.92` within 5 steps?
-- 50% sustained secure operation — fraction of steps 6–20 with `ρ_max < 0.90`
-- 20% reconnection achievement — binary, did line 0 get reconnected?
-
-**Research basis**: Three-component reward from Marchesini et al. (2025) [arXiv:2503.23101]. Activation threshold pattern from Yoon et al. (2021), ICLR 2021. Reconnection heuristic from the L2RPN 2023 winning agent (LJNAgent).
-
----
-
-### Task 3 — `cascade_prevent` · Hard · 30 steps
-
-**Scenario**: One or two lines are already disconnected and load is elevated by 5–15%. Several remaining lines are near or above their thermal limits. Grid2Op is counting down to automatic line trips — and each trip redistributes flow, potentially overloading more lines.
-
-**Objective**: Prevent automatic line trips from propagating into a cascade for 30 steps.
-
-**What makes it hard**: The key signal is not `max_rho` but `timestep_overflow` — the per-line countdown to automatic disconnection. A line at 103% with `overflow=2` is more urgent than a line at 95% with `overflow=0`, even though the second has higher absolute loading. Triage under time pressure, not global optimisation.
-
-**Reward**:
-- `+0.3` per step with no automatic trip
-- `−2.5` per automatic trip detected
-- `−0.05 × Σ overflow²` — quadratic overflow penalty that escalates with each step of inaction
-- `+0.1 × mean(clip(1 - ρ, -1, 1))` — thermal margin signal
-- Terminal: survival bonus reduced proportionally by auto-trip count, blackout penalty `−12.0`
-
-**Grader**:
-- 50% cascade containment — `steps_without_auto_trip / 30`
-- 30% thermal stability — fraction of safe steps with all lines below 100%
-- 20% recovery speed — how fast the grid reached `ρ_max < 1.0` after initial stress
-
-**Research basis**: Cascade prevention framing and curriculum profiles from Ramapuram Matavalam et al. (2023), IEEE Transactions on Power Systems. Thermal margin shaping from RL2Grid [arXiv:2503.23101]. Quadratic overflow penalty from physics urgency analysis.
-
----
-
-### Task 4 — `multi_stage_cascade` · Expert · 30 steps (3 × 10)
-
-**Scenario**: Three lines are simultaneously disconnected and load is increased by 20%. The overflow window is shortened to 2 steps. The grid will fragment — the question is not whether a cascade occurs but how much viable load survives it.
-
-**Objective**: Preserve as much load in self-sustaining grid islands as possible across three 10-step stages.
-
-**What makes it expert**: Cascade propagation is physically inevitable. Actions that appear beneficial in Stage 1 can destroy island viability in Stage 2. The agent must plan across stage boundaries, not just the current timestep.
-
-**Island viability rule**: For each connected component after fragmentation:
-- `gen_total ≥ load_total` → island is available (self-sustaining)
-- `gen_total < load_total` → island is unavailable (will collapse)
-
-**Key metric**: `available_load_ratio` — fraction of original total load still located in viable islands at each step.
-
-**Reward** (four-component MSCF structure):
-- `−0.02 × (total_gen / initial_load)` — generation cost penalty per step
-- `+0.5 × available_island_ratio` — reward for keeping more islands viable
-- `−5.0 × (1 − available_load_ratio)` — stage-boundary load-loss penalty (applied at steps 10, 20)
-- `+8.0 × (available_load_ratio²)` — terminal win reward if ≥50% load preserved at step 30
-- `−12.0` — early collapse or convergence failure
-
-**Grader**:
-- 30% stage completion — did the agent cross step 10, step 20, and step 30?
-- 40% load preservation — `available_load_ratio` at episode end (largest component)
-- 20% island quality — fraction of stage boundaries where majority of islands were viable
-- 10% speed — how fast each stage reached all lines below 100%
-
-**Research basis**: MSCF formulation, island availability assessment (`Max_Gen_Total ≥ Load_Total`), and four-component reward structure from Meng, Xu & Zhu (2025) [arXiv:2505.09012], ICLR 2025. Stage-interdependence principle and continuous action design from the same paper. Earlier MSCF MDP formulation from Zhu (2021) [arXiv:2108.10424].
-
----
-
-## Task Summary
-
-| | Task 1 | Task 2 | Task 3 | Task 4 |
-|---|---|---|---|---|
-| **Name** | `single_fault` | `n_minus_1` | `cascade_prevent` | `multi_stage_cascade` |
-| **Difficulty** | Easy | Medium | Hard | Expert |
-| **Max steps** | 10 | 20 | 30 | 30 |
-| **Lines down at reset** | 0 | 1 | 1–2 | 3 |
-| **Load increase** | 0% | 0% | +5% to +15% | +20% |
-| **Core question** | Relieve overload | Survive degraded grid | Stop cascade propagation | Preserve viable load |
-| **Key signal** | `max_rho` | `ρ_max` trending | `timestep_overflow` | `available_load_ratio` |
-| **Unique reward** | Quadratic physics reward | Three-component RL2Grid | Quadratic overflow penalty | Load preservation + island quality |
-
----
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/reset` | POST | Reset the environment; accepts `task_id`, `seed`, `difficulty_level` |
-| `/step` | POST | Execute a `GridAction`; returns `GridObservation` |
-| `/state` | GET | Current episode metadata and `episode_id` |
-| `/tasks` | GET | List all tasks with descriptions and action schema |
-| `/simulate` | POST | Simulate candidate actions on the live session without advancing state |
-| `/planning_context` | GET | Graph topology intelligence for the current episode |
-| `/grader` | POST | Score a completed episode using the deterministic grader |
-| `/baseline` | POST | Run the full baseline agent against all tasks and return scores |
-| `/ws` | WebSocket | OpenEnv-compliant persistent session interface |
-
----
-
-## Baseline Agent — Think → Simulate → Act
-
-The agent in `inference.py` implements a physics-grounded LLM planning loop:
-
-```
-reset()
-  └─ state() → episode_id
-      └─ planning_context() → graph topology, safe actions, LODF guidance
-          └─ LLM proposes 3 candidate actions
-              └─ /simulate → physics validation for each candidate
-                  └─ deterministic ranking for Task 1, LLM final selection for Tasks 2–4
-                      └─ step(action)
-                          └─ /grader at episode end
-```
-
-Key properties:
-- Candidates with `convergence_failed=True` are filtered before final selection
-- Bridge lines (whose removal would island the network) are excluded from the candidate pool
-- Ramp limits are exposed in the prompt to prevent duplicate redispatch proposals after sanitisation
-- Context window is kept compact: only lines above 80%, active overflow countdowns, and stage-specific metadata are included
-
----
-
-
-## Repository Layout
-
-```
 grid2op-openenv/
-├── server/
-│   ├── app.py             # FastAPI/OpenEnv entrypoint plus HTTP routes like /tasks, /grader, /simulate
-│   ├── environment.py     # Live Grid2Op adapter, reset defaults, reward shaping, planning support
-│   ├── tasks.py           # Task specs, benchmark tiers, dynamic scenario injection, reset replay logic
-│   ├── graders.py         # Deterministic per-task graders used by /grader
-│   ├── gradio_ui.py       # Optional OpenEnv web UI customization
-│   └── logging_utils.py   # Server logging setup
-├── models.py              # Pydantic models for actions, observations, state, logs, and baseline config
-├── client.py              # GridEnv client wrapper for reset/step/state/planning_context/simulate
-├── inference.py           # Submission baseline agent with Docker- or URL-based environment startup
-├── graph_analysis.py      # Topology analysis used in planning_context graph intelligence
-├── tests/                 # Pytest coverage for tasks, graders, parsing, and graph analysis
-├── openenv.yaml           # OpenEnv manifest (FastAPI app on port 8000)
-├── Dockerfile             # Root Docker image used for local builds and submission validation
-├── server/Dockerfile      # Server-focused Docker build variant
-├── architecture/          # System and per-task architecture notes
-└── docs/                  # Implementation notes and research-grounding writeups
+├── server/                # OpenEnv + FastAPI environment server
+├── models.py              # Shared Pydantic models
+├── client.py              # Environment client helpers
+├── inference.py           # Baseline agent and benchmark runner
+├── ft_inference.py        # Verified-candidate fine-tuned evaluation runner
+├── graph_analysis.py      # Graph intelligence and topology analysis
+├── tests/                 # Pytest suite
+├── docs/                  # Task and implementation notes
+├── hack/                  # Submission notes, plots, and benchmark writeups
+└── openenv.yaml           # OpenEnv manifest
 ```
-
----
 
 ## References
 
-1. Meng, B., Xu, C., & Zhu, Y. (2025). *Deep Reinforcement Learning for Power Grid Multi-Stage Cascading Failure Mitigation*. ICLR 2025. [arXiv:2505.09012](https://arxiv.org/abs/2505.09012)
+1. Donnot, B. et al. Grid2Op: sequential decision making in power systems.  
+https://github.com/rte-france/grid2op
 
-2. Dwivedi, A., Tajer, A., Paternain, S., & Virani, N. (2024). *RL for Mitigating Cascading Failures: Targeted Exploration via Sensitivity Factors*. NeurIPS 2024 Workshop. [arXiv:2411.18050](https://arxiv.org/abs/2411.18050)
+2. Learning to run a power network challenge for topology control.  
+https://www.sciencedirect.com/science/article/abs/pii/S0378779620304387
 
-3. Marchesini, E., Marzari, L., & Leofante, F. (2025). *RL2Grid: Benchmarking Reinforcement Learning in Power Grid Operations*. [arXiv:2503.23101](https://arxiv.org/abs/2503.23101)
+3. RL2Grid benchmark paper.  
+https://huggingface.co/papers/2503.23101
 
-4. Yoon, D., Hong, S., Lee, B.-J., & Kim, K.-E. (2021). *Winning the L2RPN Challenge: Power Grid Management via Semi-Markov Afterstate Actor-Critic*. ICLR 2021. [OpenReview](https://openreview.net/forum?id=LmUJqB1Cz8)
+4. Multi-stage cascading failure mitigation with reinforcement learning.  
+https://www.climatechange.ai/papers/iclr2025/1
 
-5. Ramapuram Matavalam, A. R., Guddanti, K. P., Weng, Y., & Ajjarapu, V. (2023). *Curriculum Based Reinforcement Learning of Grid Topology Controllers to Prevent Thermal Cascading*. IEEE Transactions on Power Systems, 38(5), 4206–4220.
-
-6. van der Sar, E. et al. (2025). *Centrally Coordinated Multi-Agent Reinforcement Learning for Power Grid Topology Control*. ACM e-Energy 2025. [arXiv:2502.08681](https://arxiv.org/abs/2502.08681)
-
-7. Zhu, Y. (2021). *Power Grid Cascading Failure Mitigation by Reinforcement Learning*. [arXiv:2108.10424](https://arxiv.org/abs/2108.10424)
-
-8. Donnot, B. (2020). *Grid2Op: A Testbed Platform to Model Sequential Decision Making in Power Systems*. [GitHub](https://github.com/rte-france/grid2op)
-
----
+5. OpenEnv / TRL environment integration.  
+https://huggingface.co/docs/trl/openenv
 
 ## License
 
