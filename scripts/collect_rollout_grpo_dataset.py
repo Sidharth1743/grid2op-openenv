@@ -10,15 +10,34 @@ from grid2op_env import GridAction, GridEnv
 from grid2op_env.inference import SimulationOutcome, filter_selectable_simulations, serialize_simulation_outcome
 from grid2op_env.models import TaskId
 from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
-from scripts.collect_teacher_dataset import build_sft_prompt
-from scripts.diagnose_action_space import _reset_and_replay
-from ft_inference import (
-    FineTunedPolicy,
-    action_key,
-    choose_ft_action,
-    generate_legal_candidates,
-    rank_simulations,
-)
+
+try:
+    from scripts.collect_teacher_dataset import build_sft_prompt
+    from scripts.diagnose_action_space import _reset_and_replay
+except ImportError:
+    from collect_teacher_dataset import build_sft_prompt
+    from diagnose_action_space import _reset_and_replay
+
+try:
+    from ft_inference import (
+        FineTunedPolicy,
+        action_key,
+        choose_ft_action,
+        generate_legal_candidates,
+        rank_simulations,
+    )
+except ImportError:
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+    from ft_inference import (  # type: ignore[no-redef]
+        FineTunedPolicy,
+        action_key,
+        choose_ft_action,
+        generate_legal_candidates,
+        rank_simulations,
+    )
 
 
 def _json_dumps(payload: Any) -> str:
