@@ -10,6 +10,7 @@ from typing import Any
 import torch
 from datasets import Dataset
 from peft import LoraConfig, PeftModel, prepare_model_for_kbit_training
+from transformers import TrainerCallback
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from trl import GRPOConfig, GRPOTrainer
 
@@ -32,6 +33,8 @@ DEFAULT_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 DEFAULT_DATASET = "outputs/datasets/grid2op_teacher_wide_balanced_v2.jsonl"
 DEFAULT_SFT_ADAPTER = "outputs/models/grid2op-qwen3-4b-sft-3k-v1"
 DEFAULT_OUTPUT_DIR = "outputs/models/grid2op-qwen3-4b-grpo-v1"
+MULTI_STAGE_RELATIVE_REWARD_MODE = "relative_multistage"
+LEGACY_REWARD_MODE = "legacy"
 
 
 def _json_dumps(payload: Any) -> str:
@@ -170,11 +173,76 @@ def _best_safe_reward(simulations: list[dict[str, Any]]) -> float | None:
     return max(float(simulation.get("simulated_reward", -1e9)) for simulation in safe)
 
 
+def _best_safe_simulation(simulations: list[dict[str, Any]]) -> dict[str, Any] | None:
+    safe = _safe_simulations(simulations)
+    if not safe:
+        return None
+    return max(safe, key=lambda simulation: float(simulation.get("simulated_reward", -1e9)))
+
+
 def _best_safe_rho(simulations: list[dict[str, Any]]) -> float | None:
     safe = _safe_simulations(simulations)
     if not safe:
         return None
     return min(float(simulation.get("max_rho", 999.0)) for simulation in safe)
+
+
+def _noop_simulation(simulations: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for simulation in simulations:
+        if _simulation_action_type(simulation) == "do_nothing":
+            return simulation
+    return None
+
+
+def _safe_proxy(simulation: dict[str, Any]) -> bool:
+    return (
+        not bool(simulation.get("done"))
+        and not bool(simulation.get("convergence_failed"))
+        and not bool(simulation.get("exceptions"))
+    )
+
+
+def _normalized_reward_delta(selected_reward: float, baseline_reward: float) -> float:
+    scale = max(1.0, abs(baseline_reward), abs(selected_reward))
+    return max(-1.0, min(1.0, (selected_reward - baseline_reward) / scale))
+
+
+def _normalized_gap_to_best(selected_reward: float, best_reward: float, noop_reward: float | None) -> float:
+    baseline = noop_reward if noop_reward is not None else best_reward
+    scale = max(1.0, abs(best_reward - baseline))
+    return max(-1.0, min(1.0, 1.0 - ((best_reward - selected_reward) / scale)))
+
+
+def _stage_progress_proxy(simulation: dict[str, Any], noop_simulation: dict[str, Any] | None) -> float:
+    selected_reward = float(simulation.get("simulated_reward", 0.0))
+    selected_rho = float(simulation.get("max_rho", 999.0))
+    progress = 0.0
+    if noop_simulation is not None:
+        noop_reward = float(noop_simulation.get("simulated_reward", 0.0))
+        noop_rho = float(noop_simulation.get("max_rho", 999.0))
+        progress += 0.7 * _normalized_reward_delta(selected_reward, noop_reward)
+        progress += 0.3 * max(-1.0, min(1.0, noop_rho - selected_rho))
+    return max(-1.0, min(1.0, progress))
+
+
+def _current_multistage_state_metrics(
+    observation_summary: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    guidance = observation_summary.get("sensitivity_guidance") or []
+    if isinstance(guidance, list):
+        for item in guidance:
+            if not isinstance(item, dict):
+                continue
+            load_ratio = item.get("available_load_ratio")
+            island_ratio = item.get("available_island_ratio")
+            if load_ratio is not None or island_ratio is not None:
+                try:
+                    parsed_load = None if load_ratio is None else float(load_ratio)
+                    parsed_island = None if island_ratio is None else float(island_ratio)
+                    return parsed_load, parsed_island
+                except (TypeError, ValueError):
+                    continue
+    return None, None
 
 
 def _compact_candidate_summary(simulations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -270,6 +338,14 @@ def format_reward(completions: list[Any], **_: Any) -> list[float]:
             rewards.append(0.2 if text.startswith("{") else 0.05)
         except Exception:
             rewards.append(-1.0)
+    return rewards
+
+
+def format_gate_reward(completions: list[Any], **_: Any) -> list[float]:
+    rewards: list[float] = []
+    for completion in completions:
+        action, _payload, error = _parse_grid_action_from_completion(completion)
+        rewards.append(1.0 if action is not None and error is None else 0.0)
     return rewards
 
 
@@ -420,7 +496,75 @@ def anti_hacking_reward(
     return rewards
 
 
-REWARD_FUNCS = [
+def multistage_relative_reward(
+    completions: list[Any],
+    task_id: list[str],
+    observation_summary: list[dict[str, Any]],
+    verified_simulation_results: list[list[dict[str, Any]]],
+    **_: Any,
+) -> list[float]:
+    rewards: list[float] = []
+    for completion, current_task, obs_summary, simulations in zip(
+        completions,
+        task_id,
+        observation_summary,
+        verified_simulation_results,
+        strict=True,
+    ):
+        if current_task != "multi_stage_cascade":
+            rewards.append(0.0)
+            continue
+        action, simulation, error = _selected_simulation(completion, simulations)
+        if action is None or simulation is None or error is not None:
+            rewards.append(0.0)
+            continue
+        noop_sim = _noop_simulation(simulations)
+        best_sim = _best_safe_simulation(simulations)
+        if best_sim is None:
+            rewards.append(-1.0)
+            continue
+        selected_reward = float(simulation.get("simulated_reward", 0.0))
+        best_reward = float(best_sim.get("simulated_reward", 0.0))
+        noop_reward = float(noop_sim.get("simulated_reward", 0.0)) if noop_sim is not None else None
+        relative_to_noop = (
+            0.0 if noop_reward is None else _normalized_reward_delta(selected_reward, noop_reward)
+        )
+        closeness_to_best = _normalized_gap_to_best(selected_reward, best_reward, noop_reward)
+        progress_proxy = _stage_progress_proxy(simulation, noop_sim)
+        load_ratio, island_ratio = _current_multistage_state_metrics(obs_summary)
+        current_state_bonus = 0.0
+        if load_ratio is not None:
+            current_state_bonus += 0.1 * max(0.0, min(1.0, load_ratio))
+        if island_ratio is not None:
+            current_state_bonus += 0.05 * max(0.0, min(1.0, island_ratio))
+        reward = (0.50 * relative_to_noop) + (0.35 * closeness_to_best) + (0.15 * progress_proxy) + current_state_bonus
+        rewards.append(max(-1.0, min(1.0, reward)))
+    return rewards
+
+
+def safety_penalty_reward(
+    completions: list[Any],
+    verified_simulation_results: list[list[dict[str, Any]]],
+    **_: Any,
+) -> list[float]:
+    rewards: list[float] = []
+    for completion, simulations in zip(completions, verified_simulation_results, strict=True):
+        _action, simulation, error = _selected_simulation(completion, simulations)
+        if simulation is None or error is not None:
+            rewards.append(0.0)
+            continue
+        if bool(simulation.get("convergence_failed")) or simulation.get("exceptions"):
+            rewards.append(-1.0)
+            continue
+        if bool(simulation.get("done")):
+            rewards.append(-1.0)
+            continue
+        overloaded = simulation.get("overloaded_line_ids") or []
+        rewards.append(-0.5 if overloaded else 0.0)
+    return rewards
+
+
+LEGACY_REWARD_FUNCS = [
     format_reward,
     schema_reward,
     verified_candidate_reward,
@@ -428,6 +572,20 @@ REWARD_FUNCS = [
     task_objective_reward,
     anti_hacking_reward,
 ]
+
+RELATIVE_MULTISTAGE_REWARD_FUNCS = [
+    format_gate_reward,
+    multistage_relative_reward,
+    safety_penalty_reward,
+]
+
+
+def get_reward_funcs(reward_mode: str) -> list[Any]:
+    if reward_mode == MULTI_STAGE_RELATIVE_REWARD_MODE:
+        return RELATIVE_MULTISTAGE_REWARD_FUNCS
+    if reward_mode == LEGACY_REWARD_MODE:
+        return LEGACY_REWARD_FUNCS
+    raise ValueError(f"Unsupported reward mode: {reward_mode}")
 
 
 def load_grpo_rows(path: Path, prompt_style: str) -> list[dict[str, Any]]:
@@ -470,6 +628,45 @@ def load_grpo_rows(path: Path, prompt_style: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _is_informative_multistage_row(row: dict[str, Any], min_noop_gap: float) -> bool:
+    if row["task_id"] != "multi_stage_cascade":
+        return True
+    simulations = row["verified_simulation_results"]
+    noop_sim = _noop_simulation(simulations)
+    best_sim = _best_safe_simulation(simulations)
+    if noop_sim is None or best_sim is None:
+        return False
+    best_reward = float(best_sim.get("simulated_reward", 0.0))
+    noop_reward = float(noop_sim.get("simulated_reward", 0.0))
+    current_max_rho = float((row.get("observation_summary") or {}).get("max_rho", 0.0))
+    if current_max_rho < 0.80 and best_reward <= noop_reward + min_noop_gap:
+        return False
+    return best_reward > noop_reward + min_noop_gap
+
+
+def filter_grpo_rows(
+    rows: list[dict[str, Any]],
+    task_filter: list[str] | None,
+    require_noop_baseline: bool,
+    min_noop_gap: float,
+    informative_multistage_only: bool,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    task_allow = set(task_filter or [])
+    for row in rows:
+        if task_allow and row["task_id"] not in task_allow:
+            continue
+        simulations = row["verified_simulation_results"]
+        if require_noop_baseline and _noop_simulation(simulations) is None:
+            continue
+        if informative_multistage_only and not _is_informative_multistage_row(row, min_noop_gap):
+            continue
+        filtered.append(row)
+    if not filtered:
+        raise ValueError("All rows were filtered out; relax task/noop/informative filters.")
+    return filtered
+
+
 def summarize_grpo_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     tasks: Counter[str] = Counter()
     tiers: Counter[str] = Counter()
@@ -477,6 +674,8 @@ def summarize_grpo_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     task_actions: dict[str, Counter[str]] = defaultdict(Counter)
     candidate_counts: list[int] = []
     target_reachable = 0
+    noop_rows = 0
+    informative_multistage_rows = 0
     for row in rows:
         task = row["task_id"]
         tasks[task] += 1
@@ -486,6 +685,10 @@ def summarize_grpo_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         task_actions[task][action] += 1
         simulations = row["verified_simulation_results"]
         candidate_counts.append(len(simulations))
+        if _noop_simulation(simulations) is not None:
+            noop_rows += 1
+        if task == "multi_stage_cascade" and _is_informative_multistage_row(row, min_noop_gap=0.01):
+            informative_multistage_rows += 1
         if task == "single_fault" and any(float(sim.get("max_rho", 999.0)) < 0.80 for sim in _safe_simulations(simulations)):
             target_reachable += 1
     return {
@@ -500,7 +703,114 @@ def summarize_grpo_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_candidate_count": sum(candidate_counts) / len(candidate_counts),
         "max_candidate_count": max(candidate_counts),
         "single_fault_target_reachable_rows": target_reachable,
+        "rows_with_noop_candidate": noop_rows,
+        "multi_stage_informative_rows": informative_multistage_rows,
     }
+
+
+class MultiStageEvalCallback(TrainerCallback):
+    def __init__(
+        self,
+        tokenizer: Any,
+        eval_rows: list[dict[str, Any]],
+        max_completion_length: int,
+        metrics_prefix: str = "judge",
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.eval_rows = eval_rows
+        self.max_completion_length = max_completion_length
+        self.metrics_prefix = metrics_prefix
+
+    def _generate_completion(self, model: Any, prompt: list[dict[str, str]]) -> str:
+        input_ids = self.tokenizer.apply_chat_template(
+            prompt,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+        )
+        device = next(model.parameters()).device
+        input_ids = input_ids.to(device)
+        attention_mask = torch.ones_like(input_ids)
+        with torch.no_grad():
+            output = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=self.max_completion_length,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        completion_ids = output[:, input_ids.shape[1] :]
+        return self.tokenizer.decode(completion_ids[0], skip_special_tokens=True)
+
+    def _compute_metrics(self, model: Any) -> dict[str, float]:
+        counters: Counter[str] = Counter()
+        noop_deltas: list[float] = []
+        best_gaps: list[float] = []
+        selected_rewards: list[float] = []
+        selected_rhos: list[float] = []
+        for row in self.eval_rows:
+            raw_completion = self._generate_completion(model, row["prompt"])
+            parsed_action, _payload, parse_error = _parse_grid_action_from_completion(raw_completion)
+            if parsed_action is not None and parse_error is None:
+                counters["valid_json"] += 1
+            action, simulation, error = _selected_simulation(raw_completion, row["verified_simulation_results"])
+            if simulation is None:
+                continue
+            counters["verified_match"] += 1
+            if _safe_proxy(simulation):
+                counters["safe_action"] += 1
+            action_kind = _simulation_action_type(simulation)
+            counters[f"action_{action_kind}"] += 1
+            selected_reward = float(simulation.get("simulated_reward", 0.0))
+            selected_rho = float(simulation.get("max_rho", 999.0))
+            selected_rewards.append(selected_reward)
+            selected_rhos.append(selected_rho)
+            noop_sim = _noop_simulation(row["verified_simulation_results"])
+            best_sim = _best_safe_simulation(row["verified_simulation_results"])
+            if noop_sim is not None:
+                noop_reward = float(noop_sim.get("simulated_reward", 0.0))
+                noop_deltas.append(_normalized_reward_delta(selected_reward, noop_reward))
+            if best_sim is not None:
+                best_reward = float(best_sim.get("simulated_reward", 0.0))
+                counters["selected_best"] += int(abs(best_reward - selected_reward) <= 1e-5)
+                best_gaps.append(best_reward - selected_reward)
+        total = max(1, len(self.eval_rows))
+        return {
+            f"{self.metrics_prefix}/multi_stage_valid_json_rate": counters["valid_json"] / total,
+            f"{self.metrics_prefix}/multi_stage_verified_match_rate": counters["verified_match"] / total,
+            f"{self.metrics_prefix}/multi_stage_safe_action_rate": counters["safe_action"] / total,
+            f"{self.metrics_prefix}/multi_stage_selected_best_rate": counters["selected_best"] / total,
+            f"{self.metrics_prefix}/multi_stage_selected_vs_noop_delta": (
+                sum(noop_deltas) / len(noop_deltas) if noop_deltas else 0.0
+            ),
+            f"{self.metrics_prefix}/multi_stage_selected_vs_best_gap": (
+                sum(best_gaps) / len(best_gaps) if best_gaps else 0.0
+            ),
+            f"{self.metrics_prefix}/multi_stage_avg_selected_reward": (
+                sum(selected_rewards) / len(selected_rewards) if selected_rewards else 0.0
+            ),
+            f"{self.metrics_prefix}/multi_stage_avg_selected_max_rho": (
+                sum(selected_rhos) / len(selected_rhos) if selected_rhos else 0.0
+            ),
+            f"{self.metrics_prefix}/multi_stage_do_nothing_ratio": counters["action_do_nothing"] / total,
+            f"{self.metrics_prefix}/multi_stage_disconnect_ratio": counters["action_disconnect_line"] / total,
+            f"{self.metrics_prefix}/multi_stage_reconnect_ratio": counters["action_reconnect_line"] / total,
+            f"{self.metrics_prefix}/multi_stage_redispatch_ratio": counters["action_redispatch"] / total,
+        }
+
+    def on_save(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        model = kwargs.get("model")
+        if model is None or not self.eval_rows:
+            return control
+        import wandb
+        was_training = model.training
+        model.eval()
+        metrics = self._compute_metrics(model)
+        wandb.log(metrics, step=state.global_step)
+        if was_training:
+            model.train()
+        return control
 
 
 def build_datasets(rows: list[dict[str, Any]], eval_ratio: float, seed: int) -> tuple[Dataset, Dataset | None]:
@@ -522,6 +832,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default="grid2op-qwen3-4b-grpo-v1")
     parser.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "grid2op-openenv-grpo"))
     parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
+    parser.add_argument("--task-filter", nargs="*", default=None)
+    parser.add_argument("--reward-mode", choices=[LEGACY_REWARD_MODE, MULTI_STAGE_RELATIVE_REWARD_MODE], default=MULTI_STAGE_RELATIVE_REWARD_MODE)
+    parser.add_argument("--require-noop-baseline", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--min-noop-gap", type=float, default=0.01)
+    parser.add_argument("--informative-multistage-only", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--eval-ratio", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--prompt-style", choices=["compact", "original"], default="compact")
@@ -546,7 +861,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--loss-type", choices=["grpo", "bnpo", "dr_grpo", "dapo", "sapo"], default="dapo")
     parser.add_argument("--scale-rewards", choices=["group", "batch", "none"], default="group")
     parser.add_argument("--multi-objective-aggregation", choices=["sum_then_normalize", "normalize_then_sum"], default="sum_then_normalize")
-    parser.add_argument("--reward-weights", default="0.5,0.5,2.0,3.0,3.0,2.0")
+    parser.add_argument("--reward-weights", default="")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--top-k", type=int, default=20)
@@ -559,13 +874,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--new-lora-r", type=int, default=32)
     parser.add_argument("--new-lora-alpha", type=int, default=64)
     parser.add_argument("--new-lora-dropout", type=float, default=0.05)
+    parser.add_argument("--judge-eval-max-rows", type=int, default=64)
     return parser.parse_args()
 
 
-def _parse_reward_weights(raw: str) -> list[float]:
+def _parse_reward_weights(raw: str, reward_funcs: list[Any]) -> list[float]:
+    if not raw.strip():
+        if reward_funcs == RELATIVE_MULTISTAGE_REWARD_FUNCS:
+            return [1.0, 4.0, 3.0]
+        if reward_funcs == LEGACY_REWARD_FUNCS:
+            return [0.5, 0.5, 2.0, 3.0, 3.0, 2.0]
     weights = [float(part.strip()) for part in raw.split(",") if part.strip()]
-    if len(weights) != len(REWARD_FUNCS):
-        raise ValueError(f"Expected {len(REWARD_FUNCS)} reward weights, got {len(weights)}")
+    if len(weights) != len(reward_funcs):
+        raise ValueError(f"Expected {len(reward_funcs)} reward weights, got {len(weights)}")
     return weights
 
 
@@ -581,10 +902,20 @@ def main() -> None:
     if args.wandb_entity:
         os.environ["WANDB_ENTITY"] = args.wandb_entity
 
+    reward_funcs = get_reward_funcs(args.reward_mode)
+    if args.reward_mode == MULTI_STAGE_RELATIVE_REWARD_MODE and not args.task_filter:
+        args.task_filter = ["multi_stage_cascade"]
     rows = load_grpo_rows(args.dataset, prompt_style=args.prompt_style)
+    rows = filter_grpo_rows(
+        rows,
+        task_filter=args.task_filter,
+        require_noop_baseline=args.require_noop_baseline,
+        min_noop_gap=args.min_noop_gap,
+        informative_multistage_only=args.informative_multistage_only,
+    )
     dataset_summary = summarize_grpo_rows(rows)
     train_dataset, eval_dataset = build_datasets(rows, args.eval_ratio, args.seed)
-    reward_weights = _parse_reward_weights(args.reward_weights)
+    reward_weights = _parse_reward_weights(args.reward_weights, reward_funcs)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -699,8 +1030,9 @@ def main() -> None:
             "output_dir": str(args.output_dir),
             "dataset_summary": dataset_summary,
             "prompt_style": args.prompt_style,
-            "reward_functions": [func.__name__ for func in REWARD_FUNCS],
+            "reward_functions": [func.__name__ for func in reward_funcs],
             "reward_weights": reward_weights,
+            "reward_mode": args.reward_mode,
             "loss_type": args.loss_type,
             "scale_rewards": args.scale_rewards,
             "multi_objective_aggregation": args.multi_objective_aggregation,
@@ -713,6 +1045,10 @@ def main() -> None:
             "use_liger_kernel": args.use_liger_kernel,
             "mask_truncated_completions": args.mask_truncated_completions,
             "prompt_style": args.prompt_style,
+            "task_filter": args.task_filter,
+            "require_noop_baseline": args.require_noop_baseline,
+            "min_noop_gap": args.min_noop_gap,
+            "informative_multistage_only": args.informative_multistage_only,
         },
     )
     wandb.summary.update(
@@ -725,13 +1061,22 @@ def main() -> None:
 
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=REWARD_FUNCS,
+        reward_funcs=reward_funcs,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
     )
+    judge_rows = [row for row in rows if row["task_id"] == "multi_stage_cascade"][: args.judge_eval_max_rows]
+    if judge_rows:
+        trainer.add_callback(
+            MultiStageEvalCallback(
+                tokenizer=tokenizer,
+                eval_rows=judge_rows,
+                max_completion_length=args.max_completion_length,
+            )
+        )
     trainer.train()
     trainer.save_model(str(args.output_dir))
     tokenizer.save_pretrained(str(args.output_dir))
