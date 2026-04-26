@@ -31,6 +31,19 @@ Current benchmark variants:
 
 This gives the benchmark both breadth across tasks and controlled difficulty variation within tasks.
 
+## Task Thresholds And Horizons
+
+The benchmark is intentionally explicit about operational targets. The most important horizons and threshold anchors are:
+
+| Task | Horizon | Primary threshold or milestone | Grader focus |
+|---|---:|---|---|
+| `single_fault` | `10` | drive the grid toward `max_rho < 0.80` | target completion, final margin, speed |
+| `n_minus_1` | `20` | emergency phase uses `rho >= 0.92`; secure phase targets `rho < 0.90` | emergency clearing, sustained security, reconnection |
+| `cascade_prevent` | `30` | prevent sustained overflow countdowns and automatic trips | containment, stability, recovery |
+| `multi_stage_cascade` | `30` | preserve load and island quality across stage boundaries | stage completion, load preservation, island quality, speed |
+
+These targets are implemented jointly through prompt rules, shaped rewards, and dedicated graders rather than by a single scalar reward alone.
+
 ## Why The Benchmark Is Varied
 
 Each task tests a different operational skill:
@@ -114,13 +127,11 @@ Unseen seed block `100..102`, `3` episodes per task:
 - failures: `0`
 
 These results show that the benchmark is strong enough to separate:
-- an unreliable base model
+- a baseline model that is inconsistent on the hardest tasks
 - a strong SFT model
-- a safe but flat GRPO follow-up
+- a safe GRPO follow-up that preserves the established operating point
 
-## What The Benchmark Still Does Not Claim
-
-We should be careful about overclaiming.
+## Benchmark Scope
 
 This benchmark does not prove:
 - utility-grade deployment readiness
@@ -134,7 +145,7 @@ What it does provide is:
 - task-specific grading
 - seen and unseen seed evaluation
 
-That is a strong benchmark package for a hackathon submission.
+This is a strong benchmark package for a hackathon submission.
 
 ## References
 

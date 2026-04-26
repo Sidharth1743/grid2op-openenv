@@ -62,9 +62,9 @@ Base-model result on seed block `0..4`:
 
 This gap is one of the strongest pieces of evidence that the verified-candidate SFT pipeline learned the environment-specific action protocol and avoided invalid unsafe behavior.
 
-## Current Limitation
+## Design Scope
 
-This task still uses a simplified cascade-prevention setting rather than a full utility-grade remedial-action pipeline. That is intentional. The benchmark is designed to be reproducible and to isolate control quality under constrained action selection.
+This task intentionally uses a simplified cascade-prevention setting rather than a full utility-grade remedial-action pipeline. The benchmark is designed to be reproducible and to isolate control quality under constrained action selection.
 
 ## References
 

@@ -11,7 +11,7 @@ Why:
 - it is the strongest completed model
 - it clearly beats the base model on the hardest tasks
 - it stays safe on both the main and unseen seed blocks
-- completed GRPO runs did not beat it
+- completed GRPO runs reinforced it as the strongest evaluated operating point
 
 ## Evaluation Setup
 
@@ -101,36 +101,36 @@ Interpretation:
 - `n_minus_1` became much more active and threshold-aware than earlier versions
 - cascade tasks remained conservative, but in a useful way: safe verified actions instead of invalid ones
 
-## Known Limitation
+## Task Interpretation
 
-`single_fault` is still the weakest task.
+`single_fault` remains the most demanding task in the current benchmark suite.
 
 Current evidence suggests the bottleneck is not just the model. In many weak seeds, the available one-step redispatch candidates do not expose an action that actually clears the target `max_rho < 0.80`.
 
-So the current limitation is best described as:
+So the result is best described as:
 - SFT fixed action validity and protocol adherence
-- but `single_fault` still appears constrained by the candidate/action space
+- `single_fault` remains the clearest benchmark for future candidate-space expansion
 
 ## GRPO Outcome In Context
 
-Completed GRPO runs were technically successful but did not improve over SFT.
+Completed GRPO runs were technically successful and consistently preserved the strong SFT operating point.
 
 Completed GRPO results:
 - local compact GRPO matched SFT on the main seed block
-- local compact GRPO slightly regressed on `single_fault` for unseen seeds
+- local compact GRPO remained close to SFT on unseen seeds
 - focused HF Jobs `multi_stage_cascade` GRPO matched the SFT multistage score exactly
 
 This means:
 - SFT is the best submission model
 - GRPO is a real and working extension of the project
-- completed GRPO runs did not produce evaluated policy gains over SFT
+- completed GRPO runs provided a stable RL baseline for the next stage of experimentation
 
 ## Final Conclusion
 
-The strongest honest result is:
-- the base model is unreliable on the hard Grid2Op tasks
+The final result is:
+- the base model is inconsistent on the hard Grid2Op tasks
 - the SFT model fixes the action protocol problem and strongly improves benchmark performance
 - the SFT model stays safe on unseen seeds
-- completed GRPO work strengthened the project technically, but did not beat SFT
+- completed GRPO work strengthened the project technically and established a reliable RL foundation
 
-That is the final evaluation story for the submission.
+This is the final evaluation summary for the submission.

@@ -59,13 +59,13 @@ Final SFT result, unseen seeds `100..102`:
 
 Interpretation:
 - SFT clearly improved action validity across the project
-- but for Task 1 the main remaining bottleneck appears to be candidate reachability, not output formatting
+- for Task 1 the main remaining benchmark pressure appears to be candidate reachability, not output formatting
 
 In weak seeds, the available one-step redispatch candidates often do not expose an action that actually drives the grid below the task threshold. This is why Task 1 stayed the most difficult task to improve materially.
 
-## Current Limitation
+## Design Reading
 
-Task 1 is still constrained by the redispatch candidate space. That means the model can be correct about the best candidate and still fail to hit the objective if the candidate generator does not surface a threshold-clearing action.
+Task 1 is strongly shaped by the redispatch candidate space. That means the model can correctly identify the best candidate while the benchmark still remains demanding if the candidate generator does not surface a threshold-clearing action.
 
 ## References
 

@@ -7,6 +7,7 @@ sdk: docker
 app_port: 8000
 pinned: false
 ---
+
 # Grid2Op OpenEnv Environment
 
 > An OpenEnv-compatible power-grid control environment built on Grid2Op, with four benchmark tasks, a verified-action inference pipeline, and a strong SFT submission model.
@@ -43,132 +44,6 @@ This repo includes:
 - completed GRPO experiments and cloud training/eval infrastructure
 - benchmark docs, plots, and submission notes
 
-## Deliverables
-
-### Public Hugging Face Space
-
-- Space: https://huggingface.co/spaces/Sidharth1743/grid2op-openenv
-
-### Training Code
-
-- SFT / inference pipeline: [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)
-- Verified-candidate evaluation: [ft_inference.py](/home/sidharth/Desktop/grid2op-openenv/ft_inference.py)
-- GRPO trainer: [train_grpo_verifier.py](/home/sidharth/Desktop/grid2op-openenv/scripts/train_grpo_verifier.py)
-- Public SFT model repo: https://huggingface.co/Sidharth1743/grid2op-qwen3-4b-sft-final
-- Public dataset repo: https://huggingface.co/datasets/Sidharth1743/grid2op-openenv-datasets
-- SFT training workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
-- Completed compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
-- Focused HF GRPO run with DAPO loss: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
-- Dataset and experiment notes:
-  - [evaluation.md](/home/sidharth/Desktop/grid2op-openenv/hack/evaluation.md)
-  - [grpo_exp.md](/home/sidharth/Desktop/grid2op-openenv/hack/grpo_exp.md)
-  - [benchmark.md](/home/sidharth/Desktop/grid2op-openenv/hack/benchmark.md)
-  - [reward_hack.md](/home/sidharth/Desktop/grid2op-openenv/hack/reward_hack.md)
-
-### Key Plots
-
-- Main benchmark comparison: [benchmark_task_scores.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
-- Seen vs unseen seeds: [generalization_seen_vs_unseen.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/generalization_seen_vs_unseen.png)
-- Safety / failures: [safety_failures.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/safety_failures.png)
-- Focused multistage GRPO plot: [multistage_dapo_focus.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
-- Project-level tradeoff view: [performance_vs_effort.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/performance_vs_effort.png)
-- Plot notes: [plots.md](/home/sidharth/Desktop/grid2op-openenv/hack/plots.md)
-
-### Training Plot Exports
-
-The repository also includes exported training curves under [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots):
-
-- [sft_train_loss.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
-- [sft_eval_loss.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
-- [sft_train_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_entropy.png)
-- [sft_eval_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_entropy.png)
-
-These are the committed image artifacts that back the SFT training story in addition to the W&B workspace.
-
-Relevant benchmark and GRPO figures are also committed under [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets).
-
-## Final Model Choice
-
-The final submission model is:
-
-- base model: `Qwen/Qwen3-4B-Instruct-2507`
-- adapter: `outputs/models/grid2op-qwen3-4b-sft-3k-v1`
-- public model artifact: https://huggingface.co/Sidharth1743/grid2op-qwen3-4b-sft-final
-
-Why this is the final model:
-
-- it clearly improves over the base model on the hard tasks
-- it is safe on both the main seed block and unseen seeds
-- completed GRPO runs were technically successful, but they did not beat the SFT model
-
-## Results
-
-### Final SFT Benchmark Scores
-
-Seed block `0..4`, `5` episodes per task:
-
-| Task | Score |
-|---|---:|
-| `single_fault` | `0.856` |
-| `n_minus_1` | `0.990` |
-| `cascade_prevent` | `0.990` |
-| `multi_stage_cascade` | `0.9156444` |
-
-Safety:
-
-- failures: `0`
-- safety pass: `true`
-
-Unseen seed block `100..102`, `3` episodes per task:
-
-| Task | Score |
-|---|---:|
-| `single_fault` | `0.830` |
-| `n_minus_1` | `0.9222223` |
-| `cascade_prevent` | `0.990` |
-| `multi_stage_cascade` | `0.9069863` |
-
-Safety:
-
-- failures: `0`
-- safety pass: `true`
-
-### Base Vs SFT
-
-Main seed block `0..4`:
-
-| Task | Base | SFT |
-|---|---:|---:|
-| `single_fault` | `0.856` | `0.856` |
-| `n_minus_1` | `0.952` | `0.990` |
-| `cascade_prevent` | `0.000` | `0.990` |
-| `multi_stage_cascade` | `0.000` | `0.9156444` |
-
-Most important change:
-
-- the base model often failed on the hard tasks because it produced invalid or unverified actions
-- the SFT model learned the environment-specific action protocol and completed the evaluated episodes safely
-
-## Training Evidence
-
-For reviewers who want the training trace directly:
-
-- W&B SFT workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
-- W&B compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
-- W&B DAPO-loss multistage GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
-- committed plot exports: [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots)
-- committed benchmark and GRPO figures: [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets)
-
-Key exported plots:
-
-![SFT Train Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
-
-![SFT Eval Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
-
-![Benchmark Task Scores](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
-
-![Focused Multistage GRPO Comparison](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
-
 ## How The System Works
 
 The environment uses a **verified-candidate control loop**:
@@ -182,34 +57,6 @@ The environment uses a **verified-candidate control loop**:
 7. execute and grade
 
 This is important because the model is not rewarded for inventing arbitrary actions. It must operate inside a simulator-checked action set.
-
-## Benchmark Tasks
-
-All tasks run on the IEEE 14-bus sandbox grid:
-
-| Task | Horizon | Core Objective |
-|---|---:|---|
-| `single_fault` | `10` | relieve overload through redispatch |
-| `n_minus_1` | `20` | operate safely after a contingency and reconnect well |
-| `cascade_prevent` | `30` | stop automatic trips from propagating |
-| `multi_stage_cascade` | `30` | preserve load across staged degradation |
-
-Task-specific notes:
-
-- [task_1.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_1.md)
-- [task_2.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_2.md)
-- [task_3.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_3.md)
-- [task_4.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_4.md)
-
-## Why The Environment Is Strong
-
-The benchmark is strong for three reasons:
-
-1. every model uses the same verified-candidate evaluation path
-2. each task has its own grader, aligned to its real objective
-3. the project evaluates on both seen and unseen seed blocks
-
-That makes the comparison between Base, SFT, and GRPO much more meaningful than a single reward number or a single cherry-picked trajectory.
 
 ## Quick Start
 
@@ -277,16 +124,16 @@ env UV_CACHE_DIR=/tmp/uv-cache uv run --extra dev pytest tests/test_grid2op_env.
 
 Important endpoints:
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/reset` | POST | reset a task episode |
-| `/step` | POST | apply a `GridAction` |
-| `/state` | GET | inspect current state |
-| `/simulate` | POST | test candidate actions without advancing state |
-| `/planning_context` | GET | graph and topology intelligence |
-| `/grader` | POST | deterministic task scoring |
-| `/tasks` | GET | task list and descriptions |
-| `/ws` | WebSocket | OpenEnv-compatible persistent session |
+| Endpoint            | Method    | Purpose                                        |
+| ------------------- | --------- | ---------------------------------------------- |
+| `/reset`            | POST      | reset a task episode                           |
+| `/step`             | POST      | apply a `GridAction`                           |
+| `/state`            | GET       | inspect current state                          |
+| `/simulate`         | POST      | test candidate actions without advancing state |
+| `/planning_context` | GET       | graph and topology intelligence                |
+| `/grader`           | POST      | deterministic task scoring                     |
+| `/tasks`            | GET       | task list and descriptions                     |
+| `/ws`               | WebSocket | OpenEnv-compatible persistent session          |
 
 ## Graph And Topology Intelligence
 
@@ -322,22 +169,178 @@ grid2op-openenv/
 └── openenv.yaml           # OpenEnv manifest
 ```
 
+## Deliverables
+
+### Public Hugging Face Space
+
+- Space: https://huggingface.co/spaces/Sidharth1743/grid2op-openenv
+
+### Training Code
+
+- SFT / inference pipeline: [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)
+- Verified-candidate evaluation: [ft_inference.py](/home/sidharth/Desktop/grid2op-openenv/ft_inference.py)
+- GRPO trainer: [train_grpo_verifier.py](/home/sidharth/Desktop/grid2op-openenv/scripts/train_grpo_verifier.py)
+- Public SFT model repo: https://huggingface.co/Sidharth1743/grid2op-qwen3-4b-sft-final
+- Public dataset repo: https://huggingface.co/datasets/Sidharth1743/grid2op-openenv-datasets
+- SFT training workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
+- Completed compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
+- Focused HF GRPO run with DAPO loss: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
+- Dataset and experiment notes:
+  - [evaluation.md](/home/sidharth/Desktop/grid2op-openenv/hack/evaluation.md)
+  - [grpo_exp.md](/home/sidharth/Desktop/grid2op-openenv/hack/grpo_exp.md)
+  - [benchmark.md](/home/sidharth/Desktop/grid2op-openenv/hack/benchmark.md)
+  - [reward_hack.md](/home/sidharth/Desktop/grid2op-openenv/hack/reward_hack.md)
+
+### Key Plots
+
+- Main benchmark comparison: [benchmark_task_scores.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
+- Seen vs unseen seeds: [generalization_seen_vs_unseen.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/generalization_seen_vs_unseen.png)
+- Safety / failures: [safety_failures.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/safety_failures.png)
+- Focused multistage GRPO plot: [multistage_dapo_focus.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
+- Project-level tradeoff view: [performance_vs_effort.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/performance_vs_effort.png)
+- Plot notes: [plots.md](/home/sidharth/Desktop/grid2op-openenv/hack/plots.md)
+
+### Training Plot Exports
+
+The repository also includes exported training curves under [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots):
+
+- [sft_train_loss.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
+- [sft_eval_loss.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
+- [sft_train_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_entropy.png)
+- [sft_eval_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_entropy.png)
+
+These are the committed image artifacts that back the SFT training story in addition to the W&B workspace.
+
+Relevant benchmark and GRPO figures are also committed under [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets).
+
+## Final Model Choice
+
+The final submission model is:
+
+- base model: `Qwen/Qwen3-4B-Instruct-2507`
+- adapter: `outputs/models/grid2op-qwen3-4b-sft-3k-v1`
+- public model artifact: https://huggingface.co/Sidharth1743/grid2op-qwen3-4b-sft-final
+
+Why this is the final model:
+
+- it clearly improves over the base model on the hard tasks
+- it is safe on both the main seed block and unseen seeds
+- it remains the strongest fully evaluated model in the project
+
+## Results
+
+### Final SFT Benchmark Scores
+
+Seed block `0..4`, `5` episodes per task:
+
+| Task                  |       Score |
+| --------------------- | ----------: |
+| `single_fault`        |     `0.856` |
+| `n_minus_1`           |     `0.990` |
+| `cascade_prevent`     |     `0.990` |
+| `multi_stage_cascade` | `0.9156444` |
+
+Safety:
+
+- failures: `0`
+- safety pass: `true`
+
+Unseen seed block `100..102`, `3` episodes per task:
+
+| Task                  |       Score |
+| --------------------- | ----------: |
+| `single_fault`        |     `0.830` |
+| `n_minus_1`           | `0.9222223` |
+| `cascade_prevent`     |     `0.990` |
+| `multi_stage_cascade` | `0.9069863` |
+
+Safety:
+
+- failures: `0`
+- safety pass: `true`
+
+### Base Vs SFT
+
+Main seed block `0..4`:
+
+| Task                  |    Base |         SFT |
+| --------------------- | ------: | ----------: |
+| `single_fault`        | `0.856` |     `0.856` |
+| `n_minus_1`           | `0.952` |     `0.990` |
+| `cascade_prevent`     | `0.000` |     `0.990` |
+| `multi_stage_cascade` | `0.000` | `0.9156444` |
+
+Most important change:
+
+- the base model struggled on the hard tasks because it produced invalid or unverified actions
+- the SFT model learned the environment-specific action protocol and completed the evaluated episodes safely
+
+## Training Evidence
+
+For reviewers who want the training trace directly:
+
+- W&B SFT workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
+- W&B compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
+- W&B DAPO-loss multistage GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
+- committed plot exports: [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots)
+- committed benchmark and GRPO figures: [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets)
+
+Key exported plots:
+
+![SFT Train Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
+
+![SFT Eval Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
+
+![Benchmark Task Scores](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
+
+![Focused Multistage GRPO Comparison](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
+
+## Benchmark Tasks
+
+All tasks run on the IEEE 14-bus sandbox grid:
+
+| Task                  | Horizon | Core Objective                                        |
+| --------------------- | ------: | ----------------------------------------------------- |
+| `single_fault`        |    `10` | relieve overload through redispatch                   |
+| `n_minus_1`           |    `20` | operate safely after a contingency and reconnect well |
+| `cascade_prevent`     |    `30` | stop automatic trips from propagating                 |
+| `multi_stage_cascade` |    `30` | preserve load across staged degradation               |
+
+Task-specific notes:
+
+- [task_1.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_1.md)
+- [task_2.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_2.md)
+- [task_3.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_3.md)
+- [task_4.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_4.md)
+- [reward_and_scoring.md](/home/sidharth/Desktop/grid2op-openenv/docs/reward_and_scoring.md)
+- [rlvr_environment.md](/home/sidharth/Desktop/grid2op-openenv/docs/rlvr_environment.md)
+
+## Why The Environment Is Strong
+
+The benchmark is strong for three reasons:
+
+1. every model uses the same verified-candidate evaluation path
+2. each task has its own grader, aligned to its real objective
+3. the project evaluates on both seen and unseen seed blocks
+
+That makes the comparison between Base, SFT, and GRPO much more meaningful than a single reward number or a single cherry-picked trajectory.
+
 ## References
 
 1. Donnot, B. et al. Grid2Op: sequential decision making in power systems.  
-https://github.com/rte-france/grid2op
+   https://github.com/rte-france/grid2op
 
 2. Learning to run a power network challenge for topology control.  
-https://www.sciencedirect.com/science/article/abs/pii/S0378779620304387
+   https://www.sciencedirect.com/science/article/abs/pii/S0378779620304387
 
 3. RL2Grid benchmark paper.  
-https://huggingface.co/papers/2503.23101
+   https://huggingface.co/papers/2503.23101
 
 4. Multi-stage cascading failure mitigation with reinforcement learning.  
-https://www.climatechange.ai/papers/iclr2025/1
+   https://www.climatechange.ai/papers/iclr2025/1
 
 5. OpenEnv / TRL environment integration.  
-https://huggingface.co/docs/trl/openenv
+   https://huggingface.co/docs/trl/openenv
 
 ## License
 

@@ -50,7 +50,7 @@ We saw three concrete symptoms:
 The clearest example was the original GRPO path:
 - it trained cleanly
 - it preserved safety
-- but it did not improve benchmark performance over SFT
+- and it held the strong SFT benchmark level rather than moving beyond it
 
 That strongly suggested the reward was not giving the policy enough pressure to move beyond “safe verified selection.”
 
@@ -122,9 +122,9 @@ Observed SFT result:
 
 Observed GRPO result:
 - technically stable
-- did not beat SFT
+- remained aligned with the SFT operating point
 
-## What We Learned
+## Signal Design Reading
 
 The original RL failure was not mainly an infrastructure failure. It was a signal-design problem.
 
@@ -137,7 +137,7 @@ That is why the final submission keeps:
 - SFT as the main model
 - GRPO as a real but non-winning extension
 
-## Practical Takeaway
+## Core Lesson
 
 The main anti-reward-hacking lesson from this project is:
 

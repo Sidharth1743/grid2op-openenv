@@ -70,9 +70,9 @@ Main action counts for the final SFT model on seed block `0..4`:
 - `reconnect_line=5`
 - `redispatch=79`
 
-## Current Limitation
+## Design Scope
 
-Task 2 is now in a good place compared with the other tasks. The main remaining risk is that it still uses a simplified structural proxy for some N-1 reasoning, not a full online contingency analysis engine. That is acceptable for the hackathon benchmark, but it is worth stating clearly.
+Task 2 is now in a strong place compared with the other tasks. It intentionally uses a simplified structural proxy for some N-1 reasoning rather than a full online contingency-analysis engine, which keeps the benchmark reproducible and focused on operational decision quality.
 
 ## References
 

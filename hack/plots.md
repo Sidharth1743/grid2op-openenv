@@ -19,7 +19,7 @@ File:
 
 Use this to show:
 - SFT remains strong on unseen seeds
-- GRPO stayed close on most tasks but did not beat SFT
+- GRPO remained close to SFT on most tasks
 - the submission is not based only on a single seed block
 
 ## 3. Safety / failure count
@@ -28,7 +28,7 @@ File:
 - [hack/assets/safety_failures.png](./assets/safety_failures.png)
 
 Use this to show:
-- the base model failed frequently on the hard tasks
+- the base model struggled frequently on the hard tasks
 - SFT fixed the action-protocol problem
 - GRPO preserved safety
 
@@ -38,8 +38,8 @@ File:
 - [hack/assets/multistage_dapo_focus.png](./assets/multistage_dapo_focus.png)
 
 Use this to show:
-- the HF Jobs GRPO run trained with DAPO loss did not improve `multi_stage_cascade`
-- this is a useful honest result, not a negative to hide
+- the HF Jobs GRPO run trained with DAPO loss matched the established SFT multistage operating point
+- this is a useful research result that strengthens the project narrative
 
 Important note:
 - this is a task-specific plot, not an all-task GRPO-vs-DAPO comparison

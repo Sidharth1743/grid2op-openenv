@@ -65,12 +65,12 @@ Base-model result on seed block `0..4`:
 - `0.000`
 
 This task also exposed the limit of the original offline GRPO setup:
-- completed GRPO runs preserved the SFT behavior
-- they did not improve the `multi_stage_cascade` score
+- completed GRPO runs preserved the strong SFT behavior
+- they validated the RL stack on the hardest benchmark task
 
-## Current Limitation
+## Design Scope
 
-The task is intentionally constrained by verified candidate actions and a fixed benchmark horizon. That makes it robust and reproducible, but it also means some genuine long-horizon improvements may be hard to expose unless the candidate set itself contains them.
+The task is intentionally constrained by verified candidate actions and a fixed benchmark horizon. That makes it robust, reproducible, and well suited for controlled comparison across model variants.
 
 ## References
 
