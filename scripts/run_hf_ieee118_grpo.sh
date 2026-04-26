@@ -6,10 +6,12 @@ set -euo pipefail
 
 HF_USERNAME="${HF_USERNAME:-Sidharth1743}"
 BRANCH_NAME="${BRANCH_NAME:-ieee118-port}"
+GIT_REF="${GIT_REF:-}"
+GIT_REPO_URL="${GIT_REPO_URL:-https://github.com/Sidharth1743/grid2op-openenv.git}"
 WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-grid2op-openenv-ieee118-grpo}"
 HF_JOB_FLAVOR="${HF_JOB_FLAVOR:-l40sx1}"
 DATASET_PATH="${DATASET_PATH:-/mnt/datasets/ieee118_teacher_actions_v1.jsonl}"
-ADAPTER_PATH="${ADAPTER_PATH:-/mnt/models/grid2op-qwen3-4b-sft-3k-v1}"
+ADAPTER_PATH="${ADAPTER_PATH:-Sidharth1743/grid2op-qwen3-4b-sft-final}"
 OUTPUT_PATH="${OUTPUT_PATH:-/mnt/runs/grid2op-qwen3-4b-grpo-ieee118-v1}"
 RUN_NAME="${RUN_NAME:-grid2op-qwen3-4b-grpo-ieee118-v1}"
 BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
@@ -29,6 +31,7 @@ LOSS_TYPE="${LOSS_TYPE:-dapo}"
 SCALE_REWARDS="${SCALE_REWARDS:-none}"
 PROMPT_STYLE="${PROMPT_STYLE:-compact}"
 JUDGE_EVAL_MAX_ROWS="${JUDGE_EVAL_MAX_ROWS:-96}"
+FOLLOW_HF_JOB_LOGS="${FOLLOW_HF_JOB_LOGS:-true}"
 
 REMOTE_CMD=$(cat <<EOF
 set -euxo pipefail
@@ -40,8 +43,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="\$HOME/.local/bin:\$PATH"
 command -v uv
 echo "[phase] clone_repo"
-git clone --depth 1 --branch ${BRANCH_NAME} https://github.com/Sidharth1743/grid2op-openenv.git /workspace
-cd /workspace
+if [ -n "${GIT_REF}" ]; then
+  git clone ${GIT_REPO_URL} /workspace
+  cd /workspace
+  git checkout ${GIT_REF}
+else
+  git clone --depth 1 --branch ${BRANCH_NAME} ${GIT_REPO_URL} /workspace
+  cd /workspace
+fi
 echo "[phase] repo_state"
 git rev-parse HEAD
 git log -1 --oneline
@@ -95,11 +104,11 @@ uv run python scripts/train_grpo_verifier.py \
 EOF
 )
 
-export HF_USERNAME BRANCH_NAME WANDB_PROJECT_NAME HF_JOB_FLAVOR DATASET_PATH ADAPTER_PATH OUTPUT_PATH RUN_NAME BASE_MODEL MAX_STEPS NUM_GENERATIONS MAX_COMPLETION_LENGTH LEARNING_RATE TRAIN_BATCH_SIZE EVAL_BATCH_SIZE GRADIENT_ACCUMULATION_STEPS LOGGING_STEPS SAVE_STEPS EVAL_STEPS EVAL_RATIO PRECISION LOSS_TYPE SCALE_REWARDS PROMPT_STYLE JUDGE_EVAL_MAX_ROWS REMOTE_CMD
+export HF_USERNAME BRANCH_NAME GIT_REF GIT_REPO_URL WANDB_PROJECT_NAME HF_JOB_FLAVOR DATASET_PATH ADAPTER_PATH OUTPUT_PATH RUN_NAME BASE_MODEL MAX_STEPS NUM_GENERATIONS MAX_COMPLETION_LENGTH LEARNING_RATE TRAIN_BATCH_SIZE EVAL_BATCH_SIZE GRADIENT_ACCUMULATION_STEPS LOGGING_STEPS SAVE_STEPS EVAL_STEPS EVAL_RATIO PRECISION LOSS_TYPE SCALE_REWARDS PROMPT_STYLE JUDGE_EVAL_MAX_ROWS FOLLOW_HF_JOB_LOGS REMOTE_CMD
 
-python - <<'PY'
+UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}" uv run python - <<'PY'
 import os
-from huggingface_hub import Volume, run_job
+from huggingface_hub import HfApi, Volume, run_job
 
 job = run_job(
     image="pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel",
@@ -125,4 +134,21 @@ print(f"View at: {job.url}")
 print(f"Will read dataset from: {os.environ['DATASET_PATH']}")
 print(f"Will initialize from adapter: {os.environ['ADAPTER_PATH']}")
 print(f"Will write adapter to: {os.environ['OUTPUT_PATH']}")
+
+follow_logs = os.environ.get("FOLLOW_HF_JOB_LOGS", "true").lower() == "true"
+if follow_logs:
+    print("[phase] follow_job_logs")
+    api = HfApi(token=os.environ["HF_TOKEN"])
+    for line in api.fetch_job_logs(job_id=job.id, follow=True):
+        print(line, end="")
+    final_info = api.inspect_job(job_id=job.id)
+    print()
+    print(
+        {
+            "job_id": job.id,
+            "final_status": str(getattr(final_info, "status", None)),
+            "final_stage": str(getattr(final_info, "stage", None)),
+            "job_url": job.url,
+        }
+    )
 PY

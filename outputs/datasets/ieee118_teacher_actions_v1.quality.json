@@ -1,0 +1,90 @@
+{
+  "row_issue_count": 0,
+  "row_issues": [],
+  "summary": {
+    "invalid_json_rows": 0,
+    "missing_metadata_rows": 0,
+    "missing_selected_action_rows": 0,
+    "missing_simulations_rows": 0,
+    "path": "outputs/datasets/ieee118_teacher_actions_v1.jsonl",
+    "rows": 543
+  },
+  "tasks": {
+    "cascade_prevent": {
+      "actions": {
+        "disconnect_line": 91,
+        "do_nothing": 3,
+        "redispatch": 53
+      },
+      "benchmark_tiers": {
+        "cascade_prevent_easy": 29,
+        "cascade_prevent_extreme": 33,
+        "cascade_prevent_hard": 37,
+        "cascade_prevent_medium": 48
+      },
+      "label_policies": {
+        "task_objective_verified_simulation": 147
+      },
+      "no_selectable_simulations": 0,
+      "rows": 147,
+      "selected_not_best_reward": 27,
+      "selected_not_best_rho": 88,
+      "selected_not_best_safe_reward": 27
+    },
+    "multi_stage_cascade": {
+      "actions": {
+        "disconnect_line": 89,
+        "do_nothing": 6,
+        "redispatch": 48
+      },
+      "benchmark_tiers": {
+        "multi_stage_cascade_expert": 143
+      },
+      "label_policies": {
+        "task_objective_verified_simulation": 143
+      },
+      "no_selectable_simulations": 0,
+      "rows": 143,
+      "selected_not_best_reward": 34,
+      "selected_not_best_rho": 64,
+      "selected_not_best_safe_reward": 32
+    },
+    "n_minus_1": {
+      "actions": {
+        "disconnect_line": 106,
+        "do_nothing": 11,
+        "redispatch": 54
+      },
+      "benchmark_tiers": {
+        "n_minus_1_fixed": 171
+      },
+      "label_policies": {
+        "task_objective_verified_simulation": 171
+      },
+      "no_selectable_simulations": 0,
+      "rows": 171,
+      "selected_not_best_reward": 29,
+      "selected_not_best_rho": 111,
+      "selected_not_best_safe_reward": 23
+    },
+    "single_fault": {
+      "actions": {
+        "do_nothing": 1,
+        "redispatch": 81
+      },
+      "benchmark_tiers": {
+        "single_fault_easy": 17,
+        "single_fault_moderate": 39,
+        "single_fault_severe": 26
+      },
+      "label_policies": {
+        "task_objective_verified_simulation": 82
+      },
+      "no_selectable_simulations": 0,
+      "rows": 82,
+      "selected_not_best_reward": 48,
+      "selected_not_best_rho": 10,
+      "selected_not_best_safe_reward": 48
+    }
+  }
+}

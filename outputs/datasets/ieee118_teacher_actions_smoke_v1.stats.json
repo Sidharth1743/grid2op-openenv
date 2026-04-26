@@ -1,0 +1,51 @@
+{
+  "api_base_url": "https://api.groq.com/openai/v1",
+  "base_url": "http://127.0.0.1:8018",
+  "episodes": 12,
+  "model": "openai/gpt-oss-20b",
+  "output_path": "outputs/datasets/ieee118_teacher_actions_smoke_v1.jsonl",
+  "quality_summary": {
+    "invalid_json_rows": 0,
+    "missing_metadata_rows": 0,
+    "missing_selected_action_rows": 0,
+    "missing_simulations_rows": 0,
+    "path": "outputs/datasets/ieee118_teacher_actions_smoke_v1.jsonl",
+    "rows": 37
+  },
+  "rows_written": 37,
+  "skipped_model_output": 0,
+  "skipped_no_candidates": 0,
+  "skipped_no_selectable": 2,
+  "tasks": {
+    "cascade_prevent": {
+      "episodes": 3,
+      "rows": 12,
+      "skipped_model_output": 0,
+      "skipped_no_candidates": 0,
+      "skipped_no_selectable": 0
+    },
+    "multi_stage_cascade": {
+      "episodes": 3,
+      "rows": 7,
+      "skipped_model_output": 0,
+      "skipped_no_candidates": 0,
+      "skipped_no_selectable": 2
+    },
+    "n_minus_1": {
+      "episodes": 3,
+      "rows": 12,
+      "skipped_model_output": 0,
+      "skipped_no_candidates": 0,
+      "skipped_no_selectable": 0
+    },
+    "single_fault": {
+      "episodes": 3,
+      "rows": 6,
+      "skipped_model_output": 0,
+      "skipped_no_candidates": 0,
+      "skipped_no_selectable": 0
+    }
+  },
+  "teacher_calls": 39,
+  "wall_time_s": 884.982114
+}
