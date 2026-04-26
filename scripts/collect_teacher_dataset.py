@@ -5,10 +5,10 @@ import json
 import os
 from pathlib import Path
 from time import perf_counter
+from time import sleep
 from typing import Any, Sequence
 
 from dotenv import load_dotenv
-import matplotlib.pyplot as plt
 
 from grid2op_env import GridAction, GridEnv
 from grid2op_env.inference import (
@@ -17,16 +17,21 @@ from grid2op_env.inference import (
     _build_llm_client,
     _chat_completion_kwargs,
     _default_model_name,
-    _llm_api_base_url,
     build_proposal_prompt,
+    filter_candidate_proposals,
     filter_selectable_simulations,
     parse_json_action,
+    parse_candidate_proposals,
     serialize_simulation_outcome,
+    supplement_candidate_proposals,
     constrain_redispatch_delta,
 )
 from grid2op_env.models import GridObservation, RedispatchGeneratorContext, TaskId
 from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
-from scripts.check_dataset_quality import check_dataset
+try:
+    from scripts.check_dataset_quality import check_dataset
+except ModuleNotFoundError:
+    from check_dataset_quality import check_dataset
 
 
 DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
@@ -34,6 +39,10 @@ DEFAULT_TEACHER_MODEL = os.environ.get("GRID2OP_TEACHER_MODEL", "Qwen/Qwen3.6-27
 DEFAULT_TEACHER_API_BASE_URL = os.environ.get(
     "GRID2OP_TEACHER_API_BASE_URL",
     os.environ.get("API_BASE_URL", DEFAULT_GROQ_BASE_URL),
+)
+DEFAULT_TEACHER_API_KEY = os.environ.get(
+    "GRID2OP_TEACHER_API_KEY",
+    os.environ.get("GROQ_API_KEY", os.environ.get("API_KEY")),
 )
 DEFAULT_GRID_MESSAGE_TIMEOUT_S = float(os.environ.get("GRID2OP_MESSAGE_TIMEOUT_S", "180"))
 DEFAULT_GRID_CONNECT_TIMEOUT_S = float(os.environ.get("GRID2OP_CONNECT_TIMEOUT_S", "30"))
@@ -62,6 +71,8 @@ def _write_collection_plots(
     stats: dict[str, Any],
     quality: dict[str, Any],
 ) -> list[Path]:
+    import matplotlib.pyplot as plt
+
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
 
@@ -596,6 +607,8 @@ def filter_teacher_candidate_proposals(
 
 def collect_teacher_dataset(
     base_url: str,
+    teacher_api_base_url: str,
+    teacher_api_key: str,
     output_path: Path,
     task_ids: Sequence[TaskId],
     episodes_per_task: int,
@@ -607,6 +620,8 @@ def collect_teacher_dataset(
     temperature: float,
     connect_timeout_s: float,
     message_timeout_s: float,
+    reset_retries: int,
+    reset_retry_delay_s: float,
     wandb_project: str | None,
     wandb_entity: str | None,
     wandb_run_name: str | None,
@@ -625,12 +640,15 @@ def collect_teacher_dataset(
         seed_start=seed_start,
         scenario_mode=scenario_mode,  # type: ignore[arg-type]
     )
-    client = _build_llm_client()
+    client = _build_llm_client(
+        api_key=teacher_api_key,
+        base_url=teacher_api_base_url,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     stats: dict[str, Any] = {
         "base_url": base_url,
-        "api_base_url": _llm_api_base_url(),
+        "api_base_url": teacher_api_base_url,
         "model": model,
         "output_path": str(output_path),
         "rows_written": 0,
@@ -639,6 +657,7 @@ def collect_teacher_dataset(
         "skipped_model_output": 0,
         "skipped_no_candidates": 0,
         "skipped_no_selectable": 0,
+        "skipped_reset_timeout": 0,
         "tasks": {},
     }
     wandb_run = _maybe_init_wandb(
@@ -647,7 +666,7 @@ def collect_teacher_dataset(
         run_name=wandb_run_name,
         config={
             "base_url": base_url,
-            "api_base_url": _llm_api_base_url(),
+            "api_base_url": teacher_api_base_url,
             "model": model,
             "output_path": str(output_path),
             "task_ids": list(task_ids),
@@ -659,13 +678,15 @@ def collect_teacher_dataset(
             "temperature": float(temperature),
             "connect_timeout_s": float(connect_timeout_s),
             "message_timeout_s": float(message_timeout_s),
+            "reset_retries": int(reset_retries),
+            "reset_retry_delay_s": float(reset_retry_delay_s),
         },
     )
     _log_event(
         {
             "event": "collection_config",
             "base_url": base_url,
-            "api_base_url": _llm_api_base_url(),
+            "api_base_url": teacher_api_base_url,
             "model": model,
             "output_path": str(output_path),
             "task_ids": list(task_ids),
@@ -677,6 +698,8 @@ def collect_teacher_dataset(
             "temperature": float(temperature),
             "connect_timeout_s": float(connect_timeout_s),
             "message_timeout_s": float(message_timeout_s),
+            "reset_retries": int(reset_retries),
+            "reset_retry_delay_s": float(reset_retry_delay_s),
         }
     )
 
@@ -699,6 +722,7 @@ def collect_teacher_dataset(
                     "skipped_model_output": 0,
                     "skipped_no_candidates": 0,
                     "skipped_no_selectable": 0,
+                    "skipped_reset_timeout": 0,
                 },
             )
             for episode_index in range(episodes_per_task):
@@ -713,13 +737,50 @@ def collect_teacher_dataset(
                         "benchmark_tier": benchmark_tier,
                     }
                 )
-                result = env.reset(
-                    task_id=task_id,
-                    seed=seed,
-                    difficulty_level=episode_index + 1,
-                    scenario_mode=scenario_mode,  # type: ignore[arg-type]
-                    benchmark_tier=benchmark_tier,
-                )
+                result = None
+                reset_attempt = 0
+                while reset_attempt <= reset_retries:
+                    try:
+                        result = env.reset(
+                            task_id=task_id,
+                            seed=seed,
+                            difficulty_level=episode_index + 1,
+                            scenario_mode=scenario_mode,  # type: ignore[arg-type]
+                            benchmark_tier=benchmark_tier,
+                        )
+                        break
+                    except TimeoutError as exc:
+                        reset_attempt += 1
+                        _log_event(
+                            {
+                                "event": "reset_timeout",
+                                "task_id": task_id,
+                                "episode_index": episode_index,
+                                "seed": seed,
+                                "benchmark_tier": benchmark_tier,
+                                "attempt": reset_attempt,
+                                "max_attempts": reset_retries + 1,
+                                "error": str(exc),
+                            }
+                        )
+                        if reset_attempt > reset_retries:
+                            stats["skipped_reset_timeout"] += 1
+                            stats["tasks"][task_id]["skipped_reset_timeout"] += 1
+                            result = None
+                            break
+                        sleep(reset_retry_delay_s)
+                if result is None:
+                    _log_event(
+                        {
+                            "event": "episode_skipped_after_reset_timeout",
+                            "task_id": task_id,
+                            "episode_index": episode_index,
+                            "seed": seed,
+                            "benchmark_tier": benchmark_tier,
+                            "rows_written_so_far": stats["rows_written"],
+                        }
+                    )
+                    continue
                 state = env.state()
                 stats["episodes"] += 1
                 stats["tasks"][task_id]["episodes"] += 1
@@ -775,7 +836,7 @@ def collect_teacher_dataset(
                     )
                     proposal_raw_output = response.choices[0].message.content or ""
                     try:
-                        proposal_candidates, proposal_trace = parse_teacher_only_proposals(
+                        proposal_candidates, proposal_trace = parse_candidate_proposals(
                             proposal_raw_output,
                             task_id=task_id,
                             n_line=len(result.observation.line_status),
@@ -802,7 +863,15 @@ def collect_teacher_dataset(
                             flush=True,
                         )
                         break
-                    proposal_candidates, prefilter_trace = filter_teacher_candidate_proposals(
+                    proposal_candidates = supplement_candidate_proposals(
+                        task_id=task_id,
+                        observation=result.observation,
+                        graph_intelligence=graph_intelligence,
+                        redispatch_generators=redispatch_generators,
+                        proposal_candidates=proposal_candidates,
+                        parsed_candidate_count=int(proposal_trace.get("parsed_candidate_count", 0)),
+                    )
+                    proposal_candidates, prefilter_trace = filter_candidate_proposals(
                         task_id=task_id,
                         observation=result.observation,
                         graph_intelligence=graph_intelligence,
@@ -817,6 +886,10 @@ def collect_teacher_dataset(
                                 "task_id": task_id,
                                 "seed": seed,
                                 "step": step_idx + 1,
+                                "benchmark_tier": benchmark_tier,
+                                "raw_output_prefix": proposal_raw_output[:500],
+                                "proposal_trace": proposal_trace,
+                                "prefilter_trace": prefilter_trace,
                             }
                         )
                         break
@@ -973,10 +1046,7 @@ def collect_teacher_dataset(
 
 def main() -> None:
     _load_env()
-    os.environ.setdefault("API_BASE_URL", DEFAULT_TEACHER_API_BASE_URL)
     os.environ.setdefault("MODEL_NAME", DEFAULT_TEACHER_MODEL)
-    if not os.environ.get("API_KEY") and os.environ.get("GROQ_API_KEY"):
-        os.environ.setdefault("API_KEY", os.environ["GROQ_API_KEY"])
 
     parser = argparse.ArgumentParser(
         description="Collect verified teacher-action data for Grid2Op SFT."
@@ -987,8 +1057,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--teacher-api-base-url",
-        default=os.environ.get("API_BASE_URL", DEFAULT_TEACHER_API_BASE_URL),
+        default=DEFAULT_TEACHER_API_BASE_URL,
         help="OpenAI-compatible API endpoint for the teacher model.",
+    )
+    parser.add_argument(
+        "--teacher-api-key",
+        default=DEFAULT_TEACHER_API_KEY,
+        help="API key for the teacher OpenAI-compatible provider. Defaults to GRID2OP_TEACHER_API_KEY, then GROQ_API_KEY, then API_KEY.",
     )
     parser.add_argument(
         "--output",
@@ -1021,16 +1096,23 @@ def main() -> None:
     )
     parser.add_argument("--connect-timeout-s", type=float, default=DEFAULT_GRID_CONNECT_TIMEOUT_S)
     parser.add_argument("--message-timeout-s", type=float, default=DEFAULT_GRID_MESSAGE_TIMEOUT_S)
+    parser.add_argument("--reset-retries", type=int, default=2)
+    parser.add_argument("--reset-retry-delay-s", type=float, default=5.0)
     parser.add_argument("--wandb-project", default=DEFAULT_WANDB_PROJECT)
     parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
     parser.add_argument("--wandb-run-name", default=None)
     args = parser.parse_args()
 
-    os.environ["API_BASE_URL"] = args.teacher_api_base_url
+    if not args.teacher_api_key:
+        raise RuntimeError(
+            "Set --teacher-api-key or GRID2OP_TEACHER_API_KEY/GROQ_API_KEY for teacher collection."
+        )
     os.environ["MODEL_NAME"] = args.model
 
     stats = collect_teacher_dataset(
         base_url=args.base_url,
+        teacher_api_base_url=args.teacher_api_base_url,
+        teacher_api_key=args.teacher_api_key,
         output_path=args.output,
         task_ids=args.task_ids,
         episodes_per_task=args.episodes_per_task,
@@ -1042,6 +1124,8 @@ def main() -> None:
         temperature=args.temperature,
         connect_timeout_s=args.connect_timeout_s,
         message_timeout_s=args.message_timeout_s,
+        reset_retries=args.reset_retries,
+        reset_retry_delay_s=args.reset_retry_delay_s,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         wandb_run_name=args.wandb_run_name,
