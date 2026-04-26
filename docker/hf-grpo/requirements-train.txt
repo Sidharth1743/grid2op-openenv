@@ -1,9 +1,0 @@
-torch==2.11.0
-datasets==4.3.0
-transformers==4.57.1
-trl==0.24.0
-peft==0.18.0
-accelerate==1.11.0
-bitsandbytes==0.48.1
-wandb==0.26.0
-tokenizers==0.22.1
