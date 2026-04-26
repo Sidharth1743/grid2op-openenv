@@ -184,7 +184,6 @@ grid2op-openenv/
 - Public dataset repo: https://huggingface.co/datasets/Sidharth1743/grid2op-openenv-datasets
 - SFT training workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
 - Completed compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
-- Focused HF GRPO run with DAPO loss: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
 - Dataset and experiment notes:
   - [evaluation.md](/home/sidharth/Desktop/grid2op-openenv/hack/evaluation.md)
   - [grpo_exp.md](/home/sidharth/Desktop/grid2op-openenv/hack/grpo_exp.md)
@@ -194,8 +193,6 @@ grid2op-openenv/
 ### Key Plots
 
 - Main benchmark comparison: [benchmark_task_scores.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
-- Seen vs unseen seeds: [generalization_seen_vs_unseen.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/generalization_seen_vs_unseen.png)
-- Safety / failures: [safety_failures.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/safety_failures.png)
 - Focused multistage GRPO plot: [multistage_dapo_focus.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
 - Project-level tradeoff view: [performance_vs_effort.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/performance_vs_effort.png)
 - Plot notes: [plots.md](/home/sidharth/Desktop/grid2op-openenv/hack/plots.md)
@@ -284,16 +281,6 @@ For reviewers who want the training trace directly:
 - W&B DAPO-loss multistage GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
 - committed plot exports: [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots)
 - committed benchmark and GRPO figures: [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets)
-
-Key exported plots:
-
-![SFT Train Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
-
-![SFT Eval Loss](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
-
-![Benchmark Task Scores](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
-
-![Focused Multistage GRPO Comparison](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
 
 ## Benchmark Tasks
 
