@@ -32,17 +32,38 @@ JUDGE_EVAL_MAX_ROWS="${JUDGE_EVAL_MAX_ROWS:-96}"
 
 REMOTE_CMD=$(cat <<EOF
 set -euxo pipefail
+echo "[phase] apt"
 apt-get update
 apt-get install -y git curl
+echo "[phase] install_uv"
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="\$HOME/.local/bin:\$PATH"
 command -v uv
+echo "[phase] clone_repo"
 git clone --depth 1 --branch ${BRANCH_NAME} https://github.com/Sidharth1743/grid2op-openenv.git /workspace
 cd /workspace
+echo "[phase] repo_state"
 git rev-parse HEAD
 git log -1 --oneline
+echo "[phase] sync_env"
 uv sync --frozen --no-dev
 uv pip install torch datasets transformers trl peft accelerate bitsandbytes wandb
+echo "[phase] dataset_probe"
+ls -lh ${DATASET_PATH}
+uv run python - <<'PY'
+from pathlib import Path
+
+path = Path("${DATASET_PATH}")
+print({"dataset_exists": path.exists(), "dataset_path": str(path), "size_bytes": path.stat().st_size if path.exists() else None})
+if path.exists():
+    with path.open("r", encoding="utf-8") as handle:
+        for idx, line in enumerate(handle, 1):
+            if idx > 3:
+                break
+            print({"dataset_sample_line": idx, "preview": line[:240]})
+PY
+mkdir -p ${OUTPUT_PATH}
+echo "[phase] run_grpo"
 uv run python scripts/train_grpo_verifier.py \
   --dataset ${DATASET_PATH} \
   --model ${BASE_MODEL} \

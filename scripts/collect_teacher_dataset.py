@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Any, Sequence
 
 from dotenv import load_dotenv
+import matplotlib.pyplot as plt
 
 from grid2op_env import GridAction, GridEnv
 from grid2op_env.inference import (
@@ -25,6 +26,7 @@ from grid2op_env.inference import (
 )
 from grid2op_env.models import GridObservation, RedispatchGeneratorContext, TaskId
 from grid2op_env.server.tasks import TASKS, benchmark_tiers_for_task
+from scripts.check_dataset_quality import check_dataset
 
 
 DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1"
@@ -35,6 +37,85 @@ DEFAULT_TEACHER_API_BASE_URL = os.environ.get(
 )
 DEFAULT_GRID_MESSAGE_TIMEOUT_S = float(os.environ.get("GRID2OP_MESSAGE_TIMEOUT_S", "180"))
 DEFAULT_GRID_CONNECT_TIMEOUT_S = float(os.environ.get("GRID2OP_CONNECT_TIMEOUT_S", "30"))
+DEFAULT_WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "grid2op-openenv-ieee118-data")
+
+
+def _maybe_init_wandb(
+    *,
+    project: str | None,
+    entity: str | None,
+    run_name: str | None,
+    config: dict[str, Any],
+):
+    if not project:
+        return None
+    try:
+        import wandb
+    except Exception:
+        return None
+    run = wandb.init(project=project, entity=entity, name=run_name, config=config)
+    return run
+
+
+def _write_collection_plots(
+    output_dir: Path,
+    stats: dict[str, Any],
+    quality: dict[str, Any],
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+
+    task_rows = {
+        task_id: int(task_stats.get("rows", 0))
+        for task_id, task_stats in sorted(quality.get("tasks", {}).items())
+    }
+    if task_rows:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.bar(task_rows.keys(), task_rows.values(), color="#2f6fed")
+        ax.set_title("IEEE 118 Teacher Rows per Task")
+        ax.set_ylabel("Rows")
+        ax.tick_params(axis="x", rotation=20)
+        fig.tight_layout()
+        path = output_dir / "task_rows.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        paths.append(path)
+
+    selected_not_best = {
+        task_id: int(task_stats.get("selected_not_best_reward", 0))
+        for task_id, task_stats in sorted(quality.get("tasks", {}).items())
+    }
+    if selected_not_best:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.bar(selected_not_best.keys(), selected_not_best.values(), color="#d95f02")
+        ax.set_title("Rows Not Matching Best Verified Reward")
+        ax.set_ylabel("Row count")
+        ax.tick_params(axis="x", rotation=20)
+        fig.tight_layout()
+        path = output_dir / "selected_not_best_reward.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        paths.append(path)
+
+    teacher_calls = int(stats.get("teacher_calls", 0))
+    rows_written = int(stats.get("rows_written", 0))
+    skipped_model_output = int(stats.get("skipped_model_output", 0))
+    skipped_no_candidates = int(stats.get("skipped_no_candidates", 0))
+    skipped_no_selectable = int(stats.get("skipped_no_selectable", 0))
+    fig, ax = plt.subplots(figsize=(7, 4))
+    labels = ["rows_written", "skip_model", "skip_no_candidates", "skip_no_selectable"]
+    values = [rows_written, skipped_model_output, skipped_no_candidates, skipped_no_selectable]
+    ax.bar(labels, values, color=["#1b9e77", "#7570b3", "#e7298a", "#66a61e"])
+    ax.set_title(f"Teacher Collection Outcomes (calls={teacher_calls})")
+    ax.set_ylabel("Count")
+    ax.tick_params(axis="x", rotation=20)
+    fig.tight_layout()
+    path = output_dir / "collection_outcomes.png"
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    paths.append(path)
+
+    return paths
 
 
 def _load_env() -> None:
@@ -46,6 +127,10 @@ def _load_env() -> None:
 
 def _json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _log_event(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, sort_keys=True), flush=True)
 
 
 def _observation_summary(observation: GridObservation) -> dict[str, Any]:
@@ -522,6 +607,9 @@ def collect_teacher_dataset(
     temperature: float,
     connect_timeout_s: float,
     message_timeout_s: float,
+    wandb_project: str | None,
+    wandb_entity: str | None,
+    wandb_run_name: str | None,
 ) -> dict[str, Any]:
     llm_config = BaselineConfig(
         model=model,
@@ -553,6 +641,44 @@ def collect_teacher_dataset(
         "skipped_no_selectable": 0,
         "tasks": {},
     }
+    wandb_run = _maybe_init_wandb(
+        project=wandb_project,
+        entity=wandb_entity,
+        run_name=wandb_run_name,
+        config={
+            "base_url": base_url,
+            "api_base_url": _llm_api_base_url(),
+            "model": model,
+            "output_path": str(output_path),
+            "task_ids": list(task_ids),
+            "episodes_per_task": int(episodes_per_task),
+            "max_steps_per_episode": max_steps_per_episode,
+            "seed_start": int(seed_start),
+            "scenario_mode": scenario_mode,
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+            "connect_timeout_s": float(connect_timeout_s),
+            "message_timeout_s": float(message_timeout_s),
+        },
+    )
+    _log_event(
+        {
+            "event": "collection_config",
+            "base_url": base_url,
+            "api_base_url": _llm_api_base_url(),
+            "model": model,
+            "output_path": str(output_path),
+            "task_ids": list(task_ids),
+            "episodes_per_task": int(episodes_per_task),
+            "max_steps_per_episode": max_steps_per_episode,
+            "seed_start": int(seed_start),
+            "scenario_mode": scenario_mode,
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+            "connect_timeout_s": float(connect_timeout_s),
+            "message_timeout_s": float(message_timeout_s),
+        }
+    )
 
     started_at = perf_counter()
     with GridEnv(
@@ -578,6 +704,15 @@ def collect_teacher_dataset(
             for episode_index in range(episodes_per_task):
                 seed = seed_start + episode_index
                 benchmark_tier = benchmark_tiers[episode_index % len(benchmark_tiers)]
+                _log_event(
+                    {
+                        "event": "episode_start",
+                        "task_id": task_id,
+                        "episode_index": episode_index,
+                        "seed": seed,
+                        "benchmark_tier": benchmark_tier,
+                    }
+                )
                 result = env.reset(
                     task_id=task_id,
                     seed=seed,
@@ -593,6 +728,21 @@ def collect_teacher_dataset(
                 for step_idx in range(step_limit):
                     if result.done:
                         break
+                    _log_event(
+                        {
+                            "event": "step_start",
+                            "task_id": task_id,
+                            "episode_index": episode_index,
+                            "seed": seed,
+                            "benchmark_tier": benchmark_tier,
+                            "step": step_idx + 1,
+                            "rows_written_so_far": stats["rows_written"],
+                            "current_max_rho": round(
+                                max((float(value) for value in result.observation.rho), default=0.0),
+                                6,
+                            ),
+                        }
+                    )
 
                     planning_context = env.planning_context(state.episode_id)
                     graph_intelligence = planning_context.graph_intelligence
@@ -614,6 +764,15 @@ def collect_teacher_dataset(
                         )
                     )
                     stats["teacher_calls"] += 1
+                    _log_event(
+                        {
+                            "event": "teacher_response",
+                            "task_id": task_id,
+                            "seed": seed,
+                            "step": step_idx + 1,
+                            "teacher_calls": stats["teacher_calls"],
+                        }
+                    )
                     proposal_raw_output = response.choices[0].message.content or ""
                     try:
                         proposal_candidates, proposal_trace = parse_teacher_only_proposals(
@@ -652,6 +811,14 @@ def collect_teacher_dataset(
                     if not proposal_candidates:
                         stats["skipped_no_candidates"] += 1
                         stats["tasks"][task_id]["skipped_no_candidates"] += 1
+                        _log_event(
+                            {
+                                "event": "skip_no_candidates",
+                                "task_id": task_id,
+                                "seed": seed,
+                                "step": step_idx + 1,
+                            }
+                        )
                         break
                     simulation_response = env.simulate_candidates(
                         state.episode_id,
@@ -684,6 +851,14 @@ def collect_teacher_dataset(
                     if selected is None:
                         stats["skipped_no_selectable"] += 1
                         stats["tasks"][task_id]["skipped_no_selectable"] += 1
+                        _log_event(
+                            {
+                                "event": "skip_no_selectable",
+                                "task_id": task_id,
+                                "seed": seed,
+                                "step": step_idx + 1,
+                            }
+                        )
                         break
                     sft_prompt = build_sft_prompt(
                         task_id=task_id,
@@ -729,11 +904,70 @@ def collect_teacher_dataset(
                     handle.flush()
                     stats["rows_written"] += 1
                     stats["tasks"][task_id]["rows"] += 1
+                    _log_event(
+                        {
+                            "event": "row_written",
+                            "task_id": task_id,
+                            "seed": seed,
+                            "step": step_idx + 1,
+                            "rows_written": stats["rows_written"],
+                            "task_rows": stats["tasks"][task_id]["rows"],
+                            "selected_candidate": selected.candidate_index,
+                        }
+                    )
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            {
+                                "collection/rows_written": stats["rows_written"],
+                                f"collection/{task_id}_rows": stats["tasks"][task_id]["rows"],
+                                "collection/teacher_calls": stats["teacher_calls"],
+                                "collection/seed": seed,
+                                "collection/step": step_idx + 1,
+                            }
+                        )
 
                     result = env.step(selected.action)
                     state = env.state()
 
+                _log_event(
+                    {
+                        "event": "episode_end",
+                        "task_id": task_id,
+                        "episode_index": episode_index,
+                        "seed": seed,
+                        "rows_written_so_far": stats["rows_written"],
+                        "task_rows_written": stats["tasks"][task_id]["rows"],
+                    }
+                )
+
     stats["wall_time_s"] = round(perf_counter() - started_at, 6)
+    quality = check_dataset(output_path)
+    stats["quality_summary"] = quality.get("summary", {})
+    stats_path = output_path.with_suffix(".stats.json")
+    quality_path = output_path.with_suffix(".quality.json")
+    stats_path.write_text(json.dumps(stats, indent=2, sort_keys=True), encoding="utf-8")
+    quality_path.write_text(json.dumps(quality, indent=2, sort_keys=True), encoding="utf-8")
+    plot_paths = _write_collection_plots(output_path.parent / "wandb_plots", stats, quality)
+    _log_event({"event": "collection_complete", "rows_written": stats["rows_written"], "output_path": str(output_path)})
+    if wandb_run is not None:
+        wandb_run.summary.update({f"stats/{key}": value for key, value in stats.items() if not isinstance(value, dict)})
+        wandb_run.summary.update({f"quality/{key}": value for key, value in quality.get("summary", {}).items()})
+        for task_id, task_stats in sorted(quality.get("tasks", {}).items()):
+            for key, value in task_stats.items():
+                if not isinstance(value, dict):
+                    wandb_run.summary[f"quality/{task_id}/{key}"] = value
+        artifact = wandb_run.Artifact(
+            name=(wandb_run_name or output_path.stem).replace("/", "-"),
+            type="dataset",
+        )
+        artifact.add_file(str(output_path), name=output_path.name)
+        artifact.add_file(str(stats_path), name=stats_path.name)
+        artifact.add_file(str(quality_path), name=quality_path.name)
+        for plot_path in plot_paths:
+            wandb_run.log({f"plots/{plot_path.stem}": wandb_run.Image(str(plot_path))})
+            artifact.add_file(str(plot_path), name=plot_path.name)
+        wandb_run.log_artifact(artifact)
+        wandb_run.finish()
     return stats
 
 
@@ -787,6 +1021,9 @@ def main() -> None:
     )
     parser.add_argument("--connect-timeout-s", type=float, default=DEFAULT_GRID_CONNECT_TIMEOUT_S)
     parser.add_argument("--message-timeout-s", type=float, default=DEFAULT_GRID_MESSAGE_TIMEOUT_S)
+    parser.add_argument("--wandb-project", default=DEFAULT_WANDB_PROJECT)
+    parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
+    parser.add_argument("--wandb-run-name", default=None)
     args = parser.parse_args()
 
     os.environ["API_BASE_URL"] = args.teacher_api_base_url
@@ -805,6 +1042,9 @@ def main() -> None:
         temperature=args.temperature,
         connect_timeout_s=args.connect_timeout_s,
         message_timeout_s=args.message_timeout_s,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_run_name=args.wandb_run_name,
     )
     print(json.dumps(stats, indent=2, sort_keys=True))
 

@@ -25,18 +25,26 @@ SUMMARY_PATH="${SUMMARY_PATH:-${LOG_DIR}/${RUN_LABEL}_seed${SEED_START}_${EPISOD
 
 REMOTE_CMD=$(cat <<EOF
 set -euxo pipefail
+echo "[phase] apt"
 apt-get update
 apt-get install -y git curl
+echo "[phase] install_uv"
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="\$HOME/.local/bin:\$PATH"
 export GRID2OP_ENV_NAME="${GRID2OP_ENV_NAME}"
 export GRID2OP_MESSAGE_TIMEOUT_S="${GRID_MESSAGE_TIMEOUT_S}"
 export GRID2OP_CONNECT_TIMEOUT_S="${GRID_CONNECT_TIMEOUT_S}"
+echo "[phase] clone_repo"
 git clone --depth 1 --branch ${BRANCH_NAME} https://github.com/Sidharth1743/grid2op-openenv.git /workspace
 mkdir -p ${LOG_DIR}
 cd /workspace
+echo "[phase] repo_state"
+git rev-parse HEAD
+git log -1 --oneline
+echo "[phase] sync_env"
 uv sync --frozen --no-dev
 uv pip install torch datasets transformers trl peft accelerate bitsandbytes fastapi uvicorn gradio pandas
+echo "[phase] preload_grid2op_env"
 uv run python - <<'PY'
 import grid2op
 
@@ -44,10 +52,12 @@ env = grid2op.make("${GRID2OP_ENV_NAME}")
 print({"preloaded_env": "${GRID2OP_ENV_NAME}", "n_line": int(env.n_line), "n_gen": int(env.n_gen)})
 env.close()
 PY
+echo "[phase] start_env_server"
 uv run python -m grid2op_env.server.app --host 127.0.0.1 --port 8018 > /tmp/grid2op_ieee118_eval_server.log 2>&1 &
 SERVER_PID=\$!
 echo "server pid: \$SERVER_PID"
 for i in \$(seq 1 90); do
+  echo "[wait_server] attempt=\$i"
   if curl -fsS http://127.0.0.1:8018/health >/dev/null; then
     break
   fi
@@ -59,6 +69,7 @@ if ! curl -fsS http://127.0.0.1:8018/health >/dev/null; then
   ps -p "\$SERVER_PID" -f || true
   exit 1
 fi
+echo "[phase] run_eval"
 uv run python ft_inference.py \
   --base-url http://127.0.0.1:8018 \
   --model ${BASE_MODEL} \
@@ -78,6 +89,7 @@ uv run python ft_inference.py \
     tail -n 200 /tmp/grid2op_ieee118_eval_server.log || true
     exit 1
   }
+echo "[phase] summarize_eval"
 uv run python scripts/check_ft_inference_log.py ${LOG_PATH} | tee ${SUMMARY_PATH}
 EOF
 )
