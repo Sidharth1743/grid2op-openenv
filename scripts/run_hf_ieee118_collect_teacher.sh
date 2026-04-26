@@ -9,6 +9,7 @@ BRANCH_NAME="${BRANCH_NAME:-ieee118-port}"
 WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-grid2op-openenv-ieee118-data}"
 HF_JOB_FLAVOR="${HF_JOB_FLAVOR:-l40sx1}"
 GRID2OP_ENV_NAME="${GRID2OP_ENV_NAME:-l2rpn_idf_2023}"
+TEACHER_BACKEND="${TEACHER_BACKEND:-groq}"
 TEACHER_MODEL="${TEACHER_MODEL:-cyankiwi/Qwen3.6-27B-AWQ-INT4}"
 TEACHER_PORT="${TEACHER_PORT:-8001}"
 TEACHER_MAX_MODEL_LEN="${TEACHER_MAX_MODEL_LEN:-8192}"
@@ -23,6 +24,11 @@ TEMPERATURE="${TEMPERATURE:-0.2}"
 GRID_MESSAGE_TIMEOUT_S="${GRID_MESSAGE_TIMEOUT_S:-240}"
 GRID_CONNECT_TIMEOUT_S="${GRID_CONNECT_TIMEOUT_S:-30}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-ieee118-teacher-actions-v1}"
+TEACHER_API_BASE_URL="${TEACHER_API_BASE_URL:-https://api.groq.com/openai/v1}"
+
+if [ "${TEACHER_BACKEND}" = "groq" ]; then
+  : "${GROQ_API_KEY:?Set GROQ_API_KEY when TEACHER_BACKEND=groq.}"
+fi
 
 REMOTE_CMD=$(cat <<EOF
 set -euxo pipefail
@@ -44,9 +50,13 @@ git rev-parse HEAD
 git log -1 --oneline
 echo "[phase] sync_env"
 uv sync --frozen --no-dev
-uv pip install torch datasets transformers trl peft accelerate bitsandbytes fastapi uvicorn gradio pandas matplotlib wandb "vllm>=0.19.0"
-echo "[phase] verify_vllm"
-uv run python -c "import vllm; print({'vllm_import_ok': True, 'version': getattr(vllm, '__version__', 'unknown')})"
+uv pip install torch datasets transformers trl peft accelerate bitsandbytes fastapi uvicorn gradio pandas matplotlib wandb
+if [ "${TEACHER_BACKEND}" = "vllm" ]; then
+  echo "[phase] install_vllm"
+  uv pip install "vllm>=0.19.0"
+  echo "[phase] verify_vllm"
+  uv run python -c "import vllm; print({'vllm_import_ok': True, 'version': getattr(vllm, '__version__', 'unknown')})"
+fi
 echo "[phase] preload_grid2op_env"
 uv run python - <<'PY'
 import grid2op
@@ -55,33 +65,57 @@ env = grid2op.make("${GRID2OP_ENV_NAME}")
 print({"preloaded_env": "${GRID2OP_ENV_NAME}", "n_line": int(env.n_line), "n_gen": int(env.n_gen)})
 env.close()
 PY
-export API_KEY="EMPTY"
-export GRID2OP_TEACHER_MODEL="${TEACHER_MODEL}"
-export GRID2OP_TEACHER_API_BASE_URL="http://127.0.0.1:${TEACHER_PORT}/v1"
-echo "[phase] start_teacher"
-uv run python -m vllm.entrypoints.openai.api_server \
-  --model ${TEACHER_MODEL} \
-  --host 127.0.0.1 \
-  --port ${TEACHER_PORT} \
-  --max-model-len ${TEACHER_MAX_MODEL_LEN} \
-  --gpu-memory-utilization ${TEACHER_GPU_MEMORY_UTILIZATION} \
-  --quantization awq \
-  --language-model-only \
-  > /tmp/grid2op_ieee118_teacher_vllm.log 2>&1 &
-VLLM_PID=\$!
-echo "teacher pid: \$VLLM_PID"
-for i in \$(seq 1 180); do
-  echo "[wait_teacher] attempt=\$i"
-  if curl -fsS http://127.0.0.1:${TEACHER_PORT}/v1/models >/dev/null; then
-    break
+if [ "${TEACHER_BACKEND}" = "groq" ]; then
+  echo "[phase] configure_teacher_backend"
+  export API_KEY="${GROQ_API_KEY}"
+  export GRID2OP_TEACHER_MODEL="${TEACHER_MODEL}"
+  export GRID2OP_TEACHER_API_BASE_URL="${TEACHER_API_BASE_URL}"
+  echo "{\"event\":\"teacher_backend\",\"backend\":\"groq\",\"model\":\"${TEACHER_MODEL}\",\"api_base_url\":\"${TEACHER_API_BASE_URL}\"}"
+  curl -fsS https://api.groq.com/openai/v1/models \
+    -H "Authorization: Bearer ${GROQ_API_KEY}" \
+    -H "Content-Type: application/json" >/tmp/grid2op_ieee118_teacher_models.json
+  echo "[phase] groq_models_probe"
+  head -c 400 /tmp/grid2op_ieee118_teacher_models.json || true
+else
+  export API_KEY="EMPTY"
+  export GRID2OP_TEACHER_MODEL="${TEACHER_MODEL}"
+  export GRID2OP_TEACHER_API_BASE_URL="http://127.0.0.1:${TEACHER_PORT}/v1"
+  echo "{\"event\":\"teacher_backend\",\"backend\":\"vllm\",\"model\":\"${TEACHER_MODEL}\",\"api_base_url\":\"http://127.0.0.1:${TEACHER_PORT}/v1\"}"
+  echo "[phase] start_teacher"
+  uv run python -m vllm.entrypoints.openai.api_server \
+    --model ${TEACHER_MODEL} \
+    --host 127.0.0.1 \
+    --port ${TEACHER_PORT} \
+    --max-model-len ${TEACHER_MAX_MODEL_LEN} \
+    --gpu-memory-utilization ${TEACHER_GPU_MEMORY_UTILIZATION} \
+    --quantization awq \
+    --language-model-only \
+    > /tmp/grid2op_ieee118_teacher_vllm.log 2>&1 &
+  VLLM_PID=\$!
+  echo "teacher pid: \$VLLM_PID"
+  for i in \$(seq 1 180); do
+    echo "[wait_teacher] attempt=\$i"
+    if curl -fsS http://127.0.0.1:${TEACHER_PORT}/v1/models >/dev/null; then
+      break
+    fi
+    if ! ps -p "\$VLLM_PID" >/dev/null 2>&1; then
+      echo "[wait_teacher] process_exited attempt=\$i"
+      echo '===== teacher log ====='
+      tail -n 200 /tmp/grid2op_ieee118_teacher_vllm.log || true
+      exit 1
+    fi
+    if [ \$((i % 10)) -eq 0 ]; then
+      echo "[wait_teacher] teacher still warming up; recent log tail:"
+      tail -n 80 /tmp/grid2op_ieee118_teacher_vllm.log || true
+    fi
+    sleep 2
+  done
+  if ! curl -fsS http://127.0.0.1:${TEACHER_PORT}/v1/models >/dev/null; then
+    echo '===== teacher log ====='
+    tail -n 200 /tmp/grid2op_ieee118_teacher_vllm.log || true
+    ps -p "\$VLLM_PID" -f || true
+    exit 1
   fi
-  sleep 2
-done
-if ! curl -fsS http://127.0.0.1:${TEACHER_PORT}/v1/models >/dev/null; then
-  echo '===== teacher log ====='
-  tail -n 200 /tmp/grid2op_ieee118_teacher_vllm.log || true
-  ps -p "\$VLLM_PID" -f || true
-  exit 1
 fi
 echo "[phase] start_env_server"
 uv run python -m grid2op_env.server.app --host 127.0.0.1 --port 8018 > /tmp/grid2op_ieee118_collect_server.log 2>&1 &
@@ -124,20 +158,24 @@ wc -l ${OUTPUT_PATH}
 EOF
 )
 
-export HF_USERNAME BRANCH_NAME WANDB_PROJECT_NAME HF_JOB_FLAVOR GRID2OP_ENV_NAME TEACHER_MODEL TEACHER_PORT TEACHER_MAX_MODEL_LEN TEACHER_GPU_MEMORY_UTILIZATION OUTPUT_PATH TASK_IDS EPISODES_PER_TASK MAX_STEPS_PER_EPISODE SEED_START MAX_TOKENS TEMPERATURE GRID_MESSAGE_TIMEOUT_S GRID_CONNECT_TIMEOUT_S WANDB_RUN_NAME REMOTE_CMD
+export HF_USERNAME BRANCH_NAME WANDB_PROJECT_NAME HF_JOB_FLAVOR GRID2OP_ENV_NAME TEACHER_BACKEND TEACHER_MODEL TEACHER_PORT TEACHER_MAX_MODEL_LEN TEACHER_GPU_MEMORY_UTILIZATION OUTPUT_PATH TASK_IDS EPISODES_PER_TASK MAX_STEPS_PER_EPISODE SEED_START MAX_TOKENS TEMPERATURE GRID_MESSAGE_TIMEOUT_S GRID_CONNECT_TIMEOUT_S WANDB_RUN_NAME TEACHER_API_BASE_URL REMOTE_CMD
 
 python - <<'PY'
 import os
 from huggingface_hub import Volume, run_job
 
+secrets = {
+    "HF_TOKEN": os.environ["HF_TOKEN"],
+    "WANDB_API_KEY": os.environ["WANDB_API_KEY"],
+}
+if os.environ["TEACHER_BACKEND"] == "groq":
+    secrets["GROQ_API_KEY"] = os.environ["GROQ_API_KEY"]
+
 job = run_job(
     image="pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel",
     command=["bash", "-lc", os.environ["REMOTE_CMD"]],
     env={"WANDB_PROJECT": os.environ["WANDB_PROJECT_NAME"]},
-    secrets={
-        "HF_TOKEN": os.environ["HF_TOKEN"],
-        "WANDB_API_KEY": os.environ["WANDB_API_KEY"],
-    },
+    secrets=secrets,
     flavor=os.environ["HF_JOB_FLAVOR"],
     timeout="12h",
     volumes=[
@@ -152,4 +190,6 @@ job = run_job(
 print(f"Job started with ID: {job.id}")
 print(f"View at: {job.url}")
 print(f"Will write dataset to: {os.environ['OUTPUT_PATH']}")
+print(f"Teacher backend: {os.environ['TEACHER_BACKEND']}")
+print(f"Teacher model: {os.environ['TEACHER_MODEL']}")
 PY
