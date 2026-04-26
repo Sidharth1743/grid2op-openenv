@@ -111,15 +111,20 @@ def _llm_api_base_url() -> str:
     return os.environ.get("API_BASE_URL", HF_ROUTER_BASE_URL)
 
 
-def _build_llm_client() -> OpenAI:
-    api_key = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY")
-    if not api_key:
+def _build_llm_client(
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> OpenAI:
+    resolved_api_key = api_key or os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")
+    resolved_base_url = base_url or _llm_api_base_url()
+    if not resolved_api_key:
         raise RuntimeError(
-            "Set HF_TOKEN or API_KEY to use Hugging Face Router inference."
+            "Set API_KEY or HF_TOKEN to use an OpenAI-compatible inference provider."
         )
     return OpenAI(
-        base_url=_llm_api_base_url(),
-        api_key=api_key,
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
     )
 
 
