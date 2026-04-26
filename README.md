@@ -8,14 +8,24 @@ app_port: 8000
 pinned: false
 ---
 
-# Grid2Op OpenEnv Environment
+# OpenEnv: Grid2op Environments
 
-> An OpenEnv-compatible power-grid control environment built on Grid2Op, with four benchmark tasks, a verified-action inference pipeline, and a strong SFT submission model.
+### Power grid topology control for reinforcement learning — four tasks, from overload relief to multi-stage cascade damage control.
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-compatible-blue)](https://github.com/meta-pytorch/OpenEnv)
 [![Grid2Op](https://img.shields.io/badge/Grid2Op-l2rpn__case14__sandbox-green)](https://grid2op.readthedocs.io)
 [![HF Space](https://img.shields.io/badge/HuggingFace-Space-yellow)](https://huggingface.co/spaces/Sidharth1743/grid2op-openenv)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+
+Project write-up: https://medium.com/@jayasreeselvam37/openenv-grid2op-environment-c45ffbcb2cc4
+
+## 📖 What is Grid2Op?
+
+[Grid2Op](https://github.com/Grid2op/grid2op) is an open-source Python platform developed by _RTE France_ (the French transmission system operator) for modelling sequential decision-making on power grids. It powers the [L2RPN](https://l2rpn.chalearn.org/) — Learning to Run a Power Network — competition series used by researchers worldwide.
+
+Think of it as _Gymnasium, but for electricity grids._ Every step() runs a full AC power flow simulation. Every observation reflects real physical quantities — line loading ratios, generator outputs, reactive power. Every action you take propagates through the grid via Kirchhoff's laws, not a lookup table.
+
+This environment wraps l2rpn_case14_sandbox (the standard IEEE 14-bus benchmark)
 
 ## Problem
 
@@ -44,20 +54,6 @@ This repo includes:
 - completed GRPO experiments and cloud training/eval infrastructure
 - benchmark docs, plots, and submission notes
 
-## How The System Works
-
-The environment uses a **verified-candidate control loop**:
-
-1. reset the task
-2. enumerate legal grid actions
-3. simulate those actions with Grid2Op
-4. prompt the model with verified candidate outcomes
-5. require the model to output a valid `GridAction`
-6. require the selected action to match one verified candidate exactly
-7. execute and grade
-
-This is important because the model is not rewarded for inventing arbitrary actions. It must operate inside a simulator-checked action set.
-
 ## Quick Start
 
 ### Prerequisites
@@ -71,10 +67,10 @@ This is important because the model is not rewarded for inventing arbitrary acti
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install -e .
+env UV_CACHE_DIR=/tmp/uv-cache uv sync --no-dev
 ```
 
-### Run the server
+### Run the environment server
 
 ```bash
 env UV_CACHE_DIR=/tmp/uv-cache uv run --no-dev server --port 8000
@@ -84,9 +80,11 @@ Server URL:
 
 - `http://127.0.0.1:8000`
 
-### Smoke test
+### Smoke test the environment
 
 ```bash
+env UV_CACHE_DIR=/tmp/uv-cache uv run --no-dev grid2op-smoke --task-id single_fault --steps 1
+
 curl -X POST http://127.0.0.1:8000/reset \
   -H "Content-Type: application/json" \
   -d '{}'
@@ -94,7 +92,7 @@ curl -X POST http://127.0.0.1:8000/reset \
 curl http://127.0.0.1:8000/tasks
 ```
 
-### Run the baseline agent
+### Run the baseline agent locally
 
 Create `.env`:
 
@@ -108,16 +106,66 @@ MODEL_NAME=openai/gpt-oss-20b:groq
 Then run:
 
 ```bash
-python inference.py --task-id single_fault
-python inference.py --task-id n_minus_1
-python inference.py --task-id cascade_prevent
-python inference.py --task-id multi_stage_cascade
+env UV_CACHE_DIR=/tmp/uv-cache uv run python inference.py --task-id single_fault
+env UV_CACHE_DIR=/tmp/uv-cache uv run python inference.py --task-id n_minus_1
+env UV_CACHE_DIR=/tmp/uv-cache uv run python inference.py --task-id cascade_prevent
+env UV_CACHE_DIR=/tmp/uv-cache uv run python inference.py --task-id multi_stage_cascade
 ```
 
 ### Run tests
 
 ```bash
 env UV_CACHE_DIR=/tmp/uv-cache uv run --extra dev pytest tests/test_grid2op_env.py -q
+```
+
+### Run the medium-cost IEEE 118 SFT benchmark on HF Jobs
+
+Script:
+
+- [run_hf_ieee118_eval.sh](scripts/run_hf_ieee118_eval.sh)
+
+Command:
+
+```bash
+export HF_TOKEN="your_hf_token"
+
+HF_JOB_FLAVOR=t4-small \
+ADAPTER_PATH=/mnt/models/grid2op-qwen3-4b-sft-3k-v1 \
+EPISODES_PER_TASK=3 \
+SEED_START=0 \
+RUN_LABEL=ieee118-qwen3-4b-sft-transfer-3eps \
+bash scripts/run_hf_ieee118_eval.sh
+```
+
+### Launch IEEE 118 GRPO training on HF Jobs
+
+Notebook:
+
+- [grid2op_training_colab.ipynb](submission/grid2op_training_colab.ipynb)
+
+Direct launcher script:
+
+- [run_hf_ieee118_grpo.sh](scripts/run_hf_ieee118_grpo.sh)
+
+Required assets before launch:
+
+- dataset in HF bucket:
+  - `/mnt/datasets/ieee118_teacher_actions_v1.jsonl`
+- public SFT adapter:
+  - `Sidharth1743/grid2op-qwen3-4b-sft-final`
+
+Command:
+
+```bash
+export HF_TOKEN="your_hf_token"
+export WANDB_API_KEY="your_wandb_key"
+
+HF_JOB_FLAVOR=l40sx1 \
+DATASET_PATH=/mnt/datasets/ieee118_teacher_actions_v1.jsonl \
+ADAPTER_PATH=Sidharth1743/grid2op-qwen3-4b-sft-final \
+RUN_NAME=grid2op-qwen3-4b-grpo-ieee118-v1 \
+OUTPUT_PATH=/mnt/runs/grid2op-qwen3-4b-grpo-ieee118-v1 \
+bash scripts/run_hf_ieee118_grpo.sh
 ```
 
 ## API
@@ -135,6 +183,39 @@ Important endpoints:
 | `/tasks`            | GET       | task list and descriptions                     |
 | `/ws`               | WebSocket | OpenEnv-compatible persistent session          |
 
+## 🌐 Environment Overview
+
+### The Grid
+
+All four tasks simulate the same physical network — the **IEEE 14-bus system**, a standard benchmark used in power systems research since the 1960s and adopted by RTE France for their L2RPN competitions.
+
+                    BUS 1 (Slack)
+                   /      \
+            BUS 2           BUS 5
+           /    \          /     \
+        BUS 3   BUS 4 ── BUS 7   BUS 6
+          |       |       |         |
+        BUS 11  BUS 9   BUS 8    BUS 11
+          |       |       |
+        BUS 10  BUS 14  BUS 13 ── BUS 12
+
+| Property           | Value                          |
+| ------------------ | ------------------------------ |
+| Environment ID     | `l2rpn_case14_sandbox`         |
+| Grid standard      | IEEE 14-bus                    |
+| Substations        | 14                             |
+| Transmission lines | 20                             |
+| Generators         | 6                              |
+| Loads              | 11                             |
+| Power flow solver  | `lightsim2grid` (full AC)      |
+| Time resolution    | 5 minutes per step             |
+| Episode length     | Up to 8,065 steps (~4.7 weeks) |
+| Scenario pool      | 1,014 pre-recorded chronics    |
+
+## The Scenario Dataset
+
+Our companion repository, **[grid2op-data](https://github.com/Jayashree1743/grid2op-data)**, provides comprehensive data intelligence for all `1,014` scenarios.
+
 ## Graph And Topology Intelligence
 
 The environment exposes structural guidance computed from the live grid state, including:
@@ -150,23 +231,88 @@ This helps the planner reason about grid structure, not just line overload numbe
 
 Main implementation:
 
-- [graph_analysis.py](/home/sidharth/Desktop/grid2op-openenv/graph_analysis.py)
-- [environment.py](/home/sidharth/Desktop/grid2op-openenv/server/environment.py)
+- [graph_analysis.py](graph_analysis.py)
+- [environment.py](server/environment.py)
 
-## Project Structure
+### The Four Tasks at a Glance
 
-```text
+Difficulty ────────────────────────────────────────────────────► Expert
+│ │ │ │
+single_fault n_minus_1 cascade_prevent multi_stage_cascade
+│ │ │ │
+10 steps 20 steps 30 steps 30 steps (3 × 10)
+│ │ │ │
+0 lines down 1 line down 1–2 lines 3 lines down + load +5–15% + load +20%
+│ │ │ │
+Relieve Survive N-1 Stop cascade Preserve viable
+overload + reconnect propagation load islands
+
+|                   |    `single_fault`     |         `n_minus_1`         |  `cascade_prevent`  |    `multi_stage_cascade`    |
+| ----------------- | :-------------------: | :-------------------------: | :-----------------: | :-------------------------: |
+| **Difficulty**    |        🟢 Easy        |          🟡 Medium          |       🔴 Hard       |          ⚫ Expert          |
+| **Horizon**       |       10 steps        |          20 steps           |      30 steps       |          30 steps           |
+| **Key signal**    |       `max_rho`       |        `ρ_max` trend        | `timestep_overflow` |   `available_load_ratio`    |
+| **Win condition** | All lines < threshold | N-1 secure + reconnect line |   Zero auto-trips   | ≥50% load in viable islands |
+
+## 🗂️ Project Structure
+
+```
 grid2op-openenv/
-├── server/                # OpenEnv + FastAPI environment server
-├── models.py              # Shared Pydantic models
-├── client.py              # Environment client helpers
-├── inference.py           # Baseline agent and benchmark runner
-├── ft_inference.py        # Verified-candidate fine-tuned evaluation runner
-├── graph_analysis.py      # Graph intelligence and topology analysis
-├── tests/                 # Pytest suite
-├── docs/                  # Task and implementation notes
-├── hack/                  # Submission notes, plots, and benchmark writeups
-└── openenv.yaml           # OpenEnv manifest
+│
+├── README.md                          # Main documentation
+├── AGENTS.md                          # Development guidelines and conventions
+├── pyproject.toml                     # Python package configuration
+├── openenv.yaml                       # OpenEnv manifest (FastAPI, port 8000)
+├── Dockerfile                         # Root container build
+├── .env.example                       # Environment variable template
+├── .gitignore / .dockerignore         # Version control + Docker exclusions
+├── synthticdata_checklist.md          # Data validation checklist
+├── _init_.py                        # Package initialization
+│
+├── models.py                          # Pydantic schemas — GridAction, GridObservation, GridState
+├── client.py                          # OpenEnv client wrapper for API interaction
+├── inference.py                       # Baseline LLM agent — Think → Simulate → Act
+├── ft_inference.py                    # Fine-tuned model inference pipeline
+├── graph_analysis.py                  # Topology intelligence — bridge lines, congestion analysis
+│
+├── server/
+│   ├── app.py                         # FastAPI/OpenEnv entrypoint + HTTP routes
+│   ├── environment.py                 # Grid2Op adapter with live AC simulation
+│   ├── tasks.py                       # Task definitions + scenario injection
+│   ├── graders.py                     # Deterministic per-task evaluation logic
+│   ├── gradio_ui.py                   # Optional Gradio web UI
+│   ├── logging_utils.py               # Server logging configuration
+│   ├── requirements.txt               # Server-specific dependencies
+│   └── Dockerfile                     # Server-focused container build
+│
+├── scripts/
+│   ├── train_sft.py                   # Supervised fine-tuning pipeline
+│   ├── train_grpo_verifier.py         # GRPO reinforcement learning training
+│   ├── collect_teacher_dataset.py     # Dataset curation for SFT training
+│   ├── filter_grpo_dataset.py         # GRPO dataset filtering
+│   ├── check_dataset_quality.py       # Training data validation
+│   ├── balance_dataset_actions.py     # Action distribution balancing
+│   ├── diagnose_action_space.py       # Action space analysis + debugging
+│   └── check_ft_inference_log.py      # Fine-tuning evaluation analysis
+│
+├── tests/
+│   └── test_grid2op_env.py            # Integration tests — environment, graders, parsing
+│
+├── outputs/
+│   ├── logs/                          # Training and evaluation logs
+│   ├── evals/                         # Evaluation results and metrics
+│   └── models/
+│       ├── grid2op-qwen3-4b-sft-3k-v1/          # SFT-trained model
+│       ├── grid2op-qwen3-4b-grpo-compact-v1/     # GRPO-trained model
+│       └── grid2op-qwen3-4b-grpo-smoke-compact/  # Smoke test model
+│
+└── architecture/
+    ├── architecture.md                # Full system architecture overview
+    ├── task_1_architecture.md         # single_fault design notes
+    ├── task_2_architecture.md         # n_minus_1 design notes
+    ├── task_3_architecture.md         # cascade_prevent design notes
+    └── task_4_architecture.md         # multi_stage_cascade design notes
+
 ```
 
 ## Deliverables
@@ -175,40 +321,62 @@ grid2op-openenv/
 
 - Space: https://huggingface.co/spaces/Sidharth1743/grid2op-openenv
 
+### Submission Files
+
+- notebook launcher: [grid2op_training_colab.ipynb](submission/grid2op_training_colab.ipynb)
+- submission readme: [README.md](submission/README.md)
+- submission guide: [docs.md](submission/docs.md)
+- submission validation script: [pre_validation.sh](submission/pre_validation.sh)
+- sample inference helper: [sample_inference.py](submission/sample_inference.py)
+
 ### Training Code
 
-- SFT / inference pipeline: [inference.py](/home/sidharth/Desktop/grid2op-openenv/inference.py)
-- Verified-candidate evaluation: [ft_inference.py](/home/sidharth/Desktop/grid2op-openenv/ft_inference.py)
-- GRPO trainer: [train_grpo_verifier.py](/home/sidharth/Desktop/grid2op-openenv/scripts/train_grpo_verifier.py)
+- SFT / inference pipeline: [inference.py](inference.py)
+- Verified-candidate evaluation: [ft_inference.py](ft_inference.py)
+- GRPO trainer: [train_grpo_verifier.py](scripts/train_grpo_verifier.py)
+- HF Jobs eval launcher: [run_hf_ieee118_eval.sh](scripts/run_hf_ieee118_eval.sh)
+- HF Jobs GRPO launcher: [run_hf_ieee118_grpo.sh](scripts/run_hf_ieee118_grpo.sh)
+- HF Jobs teacher-data launcher: [run_hf_ieee118_collect_teacher.sh](scripts/run_hf_ieee118_collect_teacher.sh)
 - Public SFT model repo: https://huggingface.co/Sidharth1743/grid2op-qwen3-4b-sft-final
 - Public dataset repo: https://huggingface.co/datasets/Sidharth1743/grid2op-openenv-datasets
 - SFT training workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
 - Completed compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
 - Dataset and experiment notes:
-  - [evaluation.md](/home/sidharth/Desktop/grid2op-openenv/hack/evaluation.md)
-  - [grpo_exp.md](/home/sidharth/Desktop/grid2op-openenv/hack/grpo_exp.md)
-  - [benchmark.md](/home/sidharth/Desktop/grid2op-openenv/hack/benchmark.md)
-  - [reward_hack.md](/home/sidharth/Desktop/grid2op-openenv/hack/reward_hack.md)
+  - [evaluation.md](hack/evaluation.md)
+  - [grpo_exp.md](hack/grpo_exp.md)
+  - [benchmark.md](hack/benchmark.md)
+  - [reward_hack.md](hack/reward_hack.md)
 
 ### Key Plots
 
-- Main benchmark comparison: [benchmark_task_scores.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/benchmark_task_scores.png)
-- Focused multistage GRPO plot: [multistage_dapo_focus.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/multistage_dapo_focus.png)
-- Project-level tradeoff view: [performance_vs_effort.png](/home/sidharth/Desktop/grid2op-openenv/hack/assets/performance_vs_effort.png)
-- Plot notes: [plots.md](/home/sidharth/Desktop/grid2op-openenv/hack/plots.md)
+- Main benchmark comparison: [benchmark_task_scores.png](hack/assets/benchmark_task_scores.png)
+- Seen-vs-unseen generalization: [generalization_seen_vs_unseen.png](hack/assets/generalization_seen_vs_unseen.png)
+- Focused multistage GRPO plot: [multistage_dapo_focus.png](hack/assets/multistage_dapo_focus.png)
+- Project-level tradeoff view: [performance_vs_effort.png](hack/assets/performance_vs_effort.png)
+- Safety failure summary: [safety_failures.png](hack/assets/safety_failures.png)
+- Plot notes: [plots.md](hack/plots.md)
 
 ### Training Plot Exports
 
-The repository also includes exported training curves under [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots):
+The repository also includes exported training curves under [training_plots](training_plots):
 
-- [sft_train_loss.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_loss.png)
-- [sft_eval_loss.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_loss.png)
-- [sft_train_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_train_entropy.png)
-- [sft_eval_entropy.png](/home/sidharth/Desktop/grid2op-openenv/training_plots/sft_eval_entropy.png)
+- [sft_train_loss.png](training_plots/sft_train_loss.png)
+- [sft_eval_loss.png](training_plots/sft_eval_loss.png)
+- [sft_train_entropy.png](training_plots/sft_train_entropy.png)
+- [sft_eval_entropy.png](training_plots/sft_eval_entropy.png)
 
 These are the committed image artifacts that back the SFT training story in addition to the W&B workspace.
 
-Relevant benchmark and GRPO figures are also committed under [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets).
+Relevant benchmark and GRPO figures are also committed under [hack/assets](hack/assets).
+
+### Environment and Scoring Docs
+
+- reward and grader reference: [reward_and_scoring.md](docs/reward_and_scoring.md)
+- RLVR and physics-verification design: [rlvr_environment.md](docs/rlvr_environment.md)
+- task 1 spec: [task_1.md](docs/task_1.md)
+- task 2 spec: [task_2.md](docs/task_2.md)
+- task 3 spec: [task_3.md](docs/task_3.md)
+- task 4 spec: [task_4.md](docs/task_4.md)
 
 ## Final Model Choice
 
@@ -279,8 +447,8 @@ For reviewers who want the training trace directly:
 - W&B SFT workspace: https://wandb.ai/sidhu1743/grid2op-openenv-sft/runs/olfjebdn?nw=nwusersid250581
 - W&B compact GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/swrnbnml?nw=nwusersid250581
 - W&B DAPO-loss multistage GRPO run: https://wandb.ai/sidhu1743/grid2op-openenv-grpo/runs/yq5rgzg0?nw=nwusersid250581
-- committed plot exports: [training_plots](/home/sidharth/Desktop/grid2op-openenv/training_plots)
-- committed benchmark and GRPO figures: [hack/assets](/home/sidharth/Desktop/grid2op-openenv/hack/assets)
+- committed plot exports: [training_plots](training_plots)
+- committed benchmark and GRPO figures: [hack/assets](hack/assets)
 
 ## Benchmark Tasks
 
@@ -295,39 +463,25 @@ All tasks run on the IEEE 14-bus sandbox grid:
 
 Task-specific notes:
 
-- [task_1.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_1.md)
-- [task_2.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_2.md)
-- [task_3.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_3.md)
-- [task_4.md](/home/sidharth/Desktop/grid2op-openenv/docs/task_4.md)
-- [reward_and_scoring.md](/home/sidharth/Desktop/grid2op-openenv/docs/reward_and_scoring.md)
-- [rlvr_environment.md](/home/sidharth/Desktop/grid2op-openenv/docs/rlvr_environment.md)
-
-## Why The Environment Is Strong
-
-The benchmark is strong for three reasons:
-
-1. every model uses the same verified-candidate evaluation path
-2. each task has its own grader, aligned to its real objective
-3. the project evaluates on both seen and unseen seed blocks
-
-That makes the comparison between Base, SFT, and GRPO much more meaningful than a single reward number or a single cherry-picked trajectory.
+- [task_1.md](docs/task_1.md)
+- [task_2.md](docs/task_2.md)
+- [task_3.md](docs/task_3.md)
+- [task_4.md](docs/task_4.md)
+- [reward_and_scoring.md](docs/reward_and_scoring.md)
+- [rlvr_environment.md](docs/rlvr_environment.md)
 
 ## References
 
-1. Donnot, B. et al. Grid2Op: sequential decision making in power systems.  
-   https://github.com/rte-france/grid2op
-
-2. Learning to run a power network challenge for topology control.  
-   https://www.sciencedirect.com/science/article/abs/pii/S0378779620304387
-
-3. RL2Grid benchmark paper.  
-   https://huggingface.co/papers/2503.23101
-
-4. Multi-stage cascading failure mitigation with reinforcement learning.  
-   https://www.climatechange.ai/papers/iclr2025/1
-
-5. OpenEnv / TRL environment integration.  
-   https://huggingface.co/docs/trl/openenv
+| Paper                                                                                                                | Venue                       | Task                                         |
+| -------------------------------------------------------------------------------------------------------------------- | --------------------------- | -------------------------------------------- |
+| Meng, Xu & Zhu — [Deep RL for Power Grid Multi-Stage Cascading Failure Mitigation](https://arxiv.org/abs/2505.09012) | ICLR 2025                   | Task 4 — MSCF reward + island viability rule |
+| Dwivedi et al. — [RL for Mitigating Cascading Failures via Sensitivity Factors](https://arxiv.org/abs/2411.18050)    | NeurIPS 2024 WS             | Task 1 — physics reward + switching cost     |
+| Marchesini et al. — [RL2Grid: Benchmarking RL in Power Grid Operations](https://arxiv.org/abs/2503.23101)            | 2025                        | Task 2 — three-component reward structure    |
+| Yoon et al. — [Winning L2RPN: Semi-Markov Afterstate Actor-Critic](https://openreview.net/forum?id=LmUJqB1Cz8)       | ICLR 2021                   | Task 2 — activation threshold pattern        |
+| Ramapuram Matavalam et al. — Curriculum RL for Cascade Prevention                                                    | IEEE Trans. Power Sys. 2023 | Task 3 — curriculum profiles                 |
+| van der Sar et al. — [Centrally Coordinated MARL for Grid Topology Control](https://arxiv.org/abs/2502.08681)        | ACM e-Energy 2025           | Multi-agent context                          |
+| Zhu — [Power Grid Cascading Failure Mitigation by RL](https://arxiv.org/abs/2108.10424)                              | 2021                        | Task 4 — MSCF MDP formulation                |
+| Donnot — [Grid2Op](https://github.com/Grid2op/grid2op)                                                               | 2020                        | Core simulation platform                     |
 
 ## License
 
